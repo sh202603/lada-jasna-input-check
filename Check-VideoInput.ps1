@@ -439,7 +439,7 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
         $bsf = "$($Result.Codec)_metadata"
         @"
 [色空間タグ欠落] 実際の色が BT.709 なら、メタデータを書き込むだけで直る (無劣化):
-  ffmpeg -i "$p" -map 0 -c copy -bsf:v ${bsf}=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1 "${stem}_tagged.mkv"
+  ffmpeg -i "$p" -map 0 -c copy -bsf:v:0 ${bsf}=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1 "${stem}_tagged.mkv"
   ※ SD (DVD) 素材で実際の色が BT.601 なら colour_primaries=5:transfer_characteristics=6:matrix_coefficients=5
 "@
       } else {
@@ -456,7 +456,7 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
         $bsf = "$($Result.Codec)_metadata"
         @"
 [色レンジ不明] 通常の動画は limited (TV) レンジ。タグを付けて remux (無劣化):
-  ffmpeg -i "$p" -map 0 -c copy -bsf:v ${bsf}=video_full_range_flag=0 "${stem}_range.mkv"
+  ffmpeg -i "$p" -map 0 -c copy -bsf:v:0 ${bsf}=video_full_range_flag=0 "${stem}_range.mkv"
 "@
       } else {
         @"
