@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ツールのバージョン。リリースごとに更新する
-$ToolVersion = "1.0.0"
+$ToolVersion = "1.0.1"
 
 # -Version: ffprobe/ffmpeg の検出より前に処理する (ツール未導入でも表示できるように)
 if ($Version) {
