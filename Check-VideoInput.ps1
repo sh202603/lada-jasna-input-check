@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ツールのバージョン。リリースごとに更新する
-$ToolVersion = "1.0.1"
+$ToolVersion = "1.0.2"
 
 # -Version: ffprobe/ffmpeg の検出より前に処理する (ツール未導入でも表示できるように)
 if ($Version) {
@@ -415,18 +415,18 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
   switch ($FixKey) {
     "genpts" { @"
 [PTS 異常] PTS を再生成して mkv に remux (無劣化・高速):
-  ffmpeg -fflags +genpts -i "$p" -map 0 -c copy -avoid_negative_ts make_zero "${stem}_fixed.mkv"
+  ffmpeg -fflags +genpts -i "$p" -map 0 -map -0:d -c copy -avoid_negative_ts make_zero "${stem}_fixed.mkv"
 "@ }
     "remux" { @"
 [コンテナ問題] mkv に remux (無劣化・高速)。コンテナ破損ならこれで直ることが多い:
-  ffmpeg -i "$p" -map 0 -c copy "${stem}_remux.mkv"
+  ffmpeg -i "$p" -map 0 -map -0:d -c copy "${stem}_remux.mkv"
   ※ ffprobe 自体が失敗する場合は -err_detect ignore_err を -i の前に追加
 "@ }
     "jasna_reencode" {
       $deint = if ($Result.Findings | Where-Object { $_.FixKey -eq "interlace" }) { ' -vf bwdif' } else { '' }
       @"
 [jasna 非対応コーデック] HEVC (NVENC) に再エンコード:
-  ffmpeg -i "$p" -map 0$deint -c:v hevc_nvenc -preset p5 -cq 19 -c:a copy "${stem}_hevc.mkv"
+  ffmpeg -i "$p" -map 0 -map -0:d$deint -c:v hevc_nvenc -preset p5 -cq 19 -c:a copy "${stem}_hevc.mkv"
   ※ DVD ソース (mpeg2) でインターレースの場合は -vf bwdif を必ず付ける
 "@ }
     "color_convert" { @"
@@ -439,7 +439,7 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
         $bsf = "$($Result.Codec)_metadata"
         @"
 [色空間タグ欠落] 実際の色が BT.709 なら、メタデータを書き込むだけで直る (無劣化):
-  ffmpeg -i "$p" -map 0 -c copy -bsf:v:0 ${bsf}=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1 "${stem}_tagged.mkv"
+  ffmpeg -i "$p" -map 0 -map -0:d -c copy -bsf:v:0 ${bsf}=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1 "${stem}_tagged.mkv"
   ※ SD (DVD) 素材で実際の色が BT.601 なら colour_primaries=5:transfer_characteristics=6:matrix_coefficients=5
 "@
       } else {
@@ -447,7 +447,7 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
 [色空間タグ欠落] $($Result.Codec) はビットストリームへのタグ書き込み不可。
   jasna の自動推定 (HD→BT.709 / SD→BT.601) で色が正しければ対処不要。
   色がずれる場合のみ再エンコードでタグ付け:
-  ffmpeg -i "$p" -map 0 -c:v hevc_nvenc -preset p5 -cq 19 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -c:a copy "${stem}_tagged.mkv"
+  ffmpeg -i "$p" -map 0 -map -0:d -c:v hevc_nvenc -preset p5 -cq 19 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -c:a copy "${stem}_tagged.mkv"
 "@
       }
     }
@@ -456,13 +456,13 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
         $bsf = "$($Result.Codec)_metadata"
         @"
 [色レンジ不明] 通常の動画は limited (TV) レンジ。タグを付けて remux (無劣化):
-  ffmpeg -i "$p" -map 0 -c copy -bsf:v:0 ${bsf}=video_full_range_flag=0 "${stem}_range.mkv"
+  ffmpeg -i "$p" -map 0 -map -0:d -c copy -bsf:v:0 ${bsf}=video_full_range_flag=0 "${stem}_range.mkv"
 "@
       } else {
         @"
 [色レンジ不明] $($Result.Codec) は無劣化でのレンジタグ書き込み不可。
   lada-ex は PyAV フォールバックで処理自体は可能 (低速化のみ)。気になる場合は再エンコード:
-  ffmpeg -i "$p" -map 0 -c:v hevc_nvenc -preset p5 -cq 19 -color_range tv -c:a copy "${stem}_range.mkv"
+  ffmpeg -i "$p" -map 0 -map -0:d -c:v hevc_nvenc -preset p5 -cq 19 -color_range tv -c:a copy "${stem}_range.mkv"
 "@
       }
     }
@@ -477,7 +477,7 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
 "@ }
     "reencode_broken" { @"
 [ビットストリーム破損] 壊れた部分を読み飛ばしつつ再エンコードで作り直す:
-  ffmpeg -err_detect ignore_err -i "$p" -map 0 -c:v hevc_nvenc -preset p5 -cq 19 -c:a aac "${stem}_repaired.mkv"
+  ffmpeg -err_detect ignore_err -i "$p" -map 0 -map -0:d -c:v hevc_nvenc -preset p5 -cq 19 -c:a aac "${stem}_repaired.mkv"
   ※ 破損箇所のフレームは欠落/乱れる。元データの再入手が可能ならそちらを推奨
 "@ }
     default { $null }

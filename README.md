@@ -270,7 +270,7 @@ lada-ex の対応リストに、一般的な動画拡張子を加えたもので
 
   --- 対処 ---
   [PTS 異常] PTS を再生成して mkv に remux (無劣化・高速):
-    ffmpeg -fflags +genpts -i "..." -map 0 -c copy -avoid_negative_ts make_zero "..._fixed.mkv"
+    ffmpeg -fflags +genpts -i "..." -map 0 -map -0:d -c copy -avoid_negative_ts make_zero "..._fixed.mkv"
 ```
 
 - 判定は、FAIL があれば `NG`、WARN のみなら `注意`、何も無ければ `OK` です。
@@ -303,6 +303,8 @@ lada-ex の対応リストに、一般的な動画拡張子を加えたもので
 - **拡張子非対応そのものが修復対象**: 拡張子が lada-ex 対応外（例: `.flv`）のとき、同じ拡張子で出すと非対応のままになります。`.mkv` は lada-ex / jasna 両対応です。
 - **mkv が最も寛容**: 負 PTS・PTS 欠落・特殊な time_base などを `+genpts` / `-avoid_negative_ts make_zero` で作り直したストリームを mp4 に戻すと制約に引っかかり再発・失敗しやすい一方、mkv は素直に格納できます。
 - **コーデックを選ばない**: `.avi` / `.wmv` / `.vob` などへ HEVC を正規に格納できないコンテナでも、mkv なら確実に収まります。
+
+なお、`-map 0` で全ストリームをコピーする修復コマンドには `-map -0:d` を併用し、データストリーム（例: mp4 の `bin_data` チャプターテキスト）を除外しています。Matroska は audio/video/subtitle のみ格納可能で、データストリームを含めると `Only audio, video, and subtitles are supported for Matroska` でヘッダ生成に失敗するためです。`-map -0:d` はデータストリームが無いファイルでは無害です。
 
 ---
 
