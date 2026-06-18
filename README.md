@@ -1,5 +1,9 @@
 # Check-VideoInput for lada-ex / jasna
 
+**日本語** | [English](README.en.md)
+
+Version: 1.1.0
+
 [lada-ex](https://codeberg.org/comman/lada-ex) / [jasna](https://github.com/Kruk2/jasna) に投入する動画を、処理を始める前に検査する PowerShell 製のツールです。
 
 ffprobe / ffmpeg を使って動画のメタデータ・PTS/DTS・ビットストリームを調べ、両ツールの仕様 (コンテナ / コーデック / 色空間) に合っているか、PTS の壊れ (欠落・負値・重複・逆行・大きなギャップ) が無いかを事前に確認します。問題が見つかった場合は、その原因の説明とあわせて、**そのままコピー&ペーストして実行できる修復用の ffmpeg コマンド**を提示します。(対処コマンドのファイル書き出しも可)
@@ -146,6 +150,7 @@ Check-VideoInput.bat D:\videos\sample.mp4 -Level full
 | `-Path`（位置 0、必須） | ファイル or フォルダ | — | フォルダを指定すると、対象拡張子の動画をまとめて検査します |
 | `-Target` | `lada` / `jasna` / `both` | `both` | 判定の基準とするツールです。判定行・対処・終了コードに影響します |
 | `-Level` | `quick` / `standard` / `full` | `standard` | 検査の深さです（下表） |
+| `-Lang` | `ja` / `en` / `auto` | `auto` | 表示言語です。`auto` は OS のカルチャが日本語なら日本語、それ以外は英語で表示します（判定・終了コードは言語に依存しません） |
 | `-Recurse` | スイッチ | off | フォルダのサブディレクトリも対象にします |
 | `-FixScript` | 出力ファイルのパス | — | 表示した対処コマンドを、後でまとめて実行できる 1 つのファイルに書き出します（下記） |
 | `-FFprobePath` / `-FFmpegPath` | パス | 自動検出 | ffprobe / ffmpeg の場所を明示的に指定します |
