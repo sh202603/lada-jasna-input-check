@@ -2,7 +2,7 @@
 
 [日本語](README.md) | **English**
 
-Version: 1.1.0
+Version: 1.2.0
 
 A PowerShell tool that inspects videos before you feed them to [lada-ex](https://codeberg.org/comman/lada-ex) / [jasna](https://github.com/Kruk2/jasna).
 
@@ -150,6 +150,8 @@ This wrapper works as follows.
 | `-Path` (position 0, required) | file or folder | — | Specifying a folder inspects all videos with target extensions at once |
 | `-Target` | `lada` / `jasna` / `both` | `both` | The tool to judge against. Affects the verdict line, fixes, and exit code |
 | `-Level` | `quick` / `standard` / `full` | `standard` | Inspection depth (see table below) |
+| `-JasnaVersion` | `0.7.2` / `0.8.1` | `0.8.1` | The jasna version to judge against. jasna 0.8.1 moved its media layer to PyAV, which changed the input constraints substantially. Only meaningful when `-Target` is `jasna` or `both` |
+| `-Segments` | switch | off | Adds the stricter checks that apply when jasna's `--segments` (smart rendering) is used. Only active on 0.8.1; a no-op on 0.7.2 |
 | `-Lang` | `ja` / `en` / `auto` | `auto` | Display language. `auto` shows Japanese if the OS culture is Japanese, otherwise English (the verdict and exit code are language-independent) |
 | `-Recurse` | switch | off | Also include subdirectories of the folder |
 | `-FixScript` | output file path | — | Writes the shown repair commands to a single file you can run later as a batch (see below) |
@@ -253,12 +255,43 @@ Runs `ffmpeg -v error -i <file> -map 0:v:0 -f null -`, and if there is any error
 
 ### jasna-specific judgments
 
-| Item | Verdict | Rationale |
-|---|---|---|
-| Codec other than h264/hevc/vp9/av1 | **FAIL** | Unsupported, since NVDEC decoding is assumed |
-| `color_space` other than bt709/smpte170m/bt470bg | **FAIL** | Anything other than BT.709/BT.601 stops with `UnsupportedColorspaceError` |
-| `color_space` not set | WARN | Guessed from resolution as BT.709/601 (colors shift if wrong) |
-| Negative-PTS packets | WARN | Silently dropped during NVDEC decoding (missing head) |
+jasna 0.8.1 replaced its media layer wholesale (python_vali/PyNvVideoCodec → **PyAV**), which changed the input constraints substantially. `-JasnaVersion` selects which set of criteria to apply (default `0.8.1`).
+
+| Item | 0.7.2 | 0.8.1 | Rationale |
+|---|---|---|---|
+| Codec other than h264/hevc/vp9/av1 | **FAIL** | WARN | 0.7.2 requires NVDEC and cannot process it. 0.8.1 falls back to CPU decoding automatically, so the only cost is speed |
+| `color_space` not recognized | WARN | WARN | 0.8.1 added BT.2020 support. **In both versions an unknown tag is silently coerced to BT.709 rather than raising**, so the real cost is shifted colors, not a crash |
+| `color_space` not set | WARN | WARN | Same as above (silently treated as BT.709) |
+| Odd width or height | — | **FAIL** | 0.8.1's NV12 conversion requires even dimensions and aborts **after encoding has started** |
+| `duration` unavailable | **FAIL** | **FAIL** | Aborts with a `KeyError` while reading metadata |
+| `start_pts` missing | WARN | WARN | The GUI preview aborts with a `TypeError` (CLI runs still work) |
+| HDR (PQ / HLG) | WARN | WARN | No tone mapping; the transfer characteristics pass straight through, so output is blown out or crushed |
+| Interlaced | WARN | WARN | jasna does not deinterlace |
+| Chroma other than 4:2:0 (4:2:2 / 4:4:4 / RGB) | WARN | WARN | Subsampled to 4:2:0, losing color resolution |
+| Bit depth above 10-bit | WARN | WARN | Reduced to 10-bit |
+| Negative-PTS packets | WARN | WARN | 0.7.2 drops them (missing head). 0.8.1 keeps them and shifts the origin to 0 |
+| Subtitle / data / attachment / chapter streams | WARN | WARN | Lost in the output (only the first video stream plus audio are muxed) |
+| Multiple video streams | WARN | WARN | Only the first one is processed |
+| Audio packets without PTS/DTS | WARN | WARN | Those packets are dropped (checked at `standard` and above) |
+| Extension outside the folder-scan list | WARN | WARN | jasna's folder scan only covers `.mp4 .mkv .avi .mov .wmv .flv .webm`. Passing the file individually still works (detected only for folder input) |
+
+> Because a missing `duration` is now a FAIL, files that previously exited with code 1 may now exit with 2.
+
+### Extra checks for `--segments` (`-Segments`)
+
+jasna's `--segments` (smart rendering) is far stricter than the normal path, and failing a gate means the job is **rejected** rather than falling back to a full re-encode. `-Segments` adds the following checks (all FAIL except the output-container item, which is WARN).
+
+| Item | Requirement |
+|---|---|
+| Codec | `h264` / `hevc` / `av1` only |
+| `pix_fmt` | `yuv420p` / `yuvj420p` / `nv12` / `yuv420p10le` / `p010le` only |
+| Interlacing | Progressive only |
+| 10-bit H.264 | Not supported |
+| H.264 profile | `baseline` / `constrained baseline` / `main` / `high` only |
+| Frame rate | CFR required (`r_frame_rate` and `avg_frame_rate` within 0.1% — stricter than the common VFR check) |
+| Input extension | Output containers are limited to `.mp4` / `.mov` / `.mkv`, so anything else requires specifying the output extension explicitly |
+
+0.7.2 has no `--segments` at all, so combining `-Segments` with `-JasnaVersion 0.7.2` adds nothing.
 
 ---
 
@@ -267,11 +300,14 @@ Runs `ffmpeg -v error -i <file> -map 0:v:0 -f null -`, and if there is any error
 Each file is shown like this.
 
 ```
+Checking 1 file(s) / Target=both / Level=quick
+jasna spec version: 0.8.1
+
 === sample.mp4 ===
-  Metadata: mp4 / h264 / 1920x1080 / yuv420p / 29.97fps / 0:12:34 / audio: aac
+  Metadata: mp4 / h264 / 1921x1080 / yuv420p / 29.97fps / 0:12:34 / audio: aac
   [WARN] (lada-ex) Negative start PTS (first_pts=-2002). ...
-  [FAIL] (jasna) color_space=bt2020nc — jasna supports only BT.709/BT.601 ...
-  Verdict: lada-ex → WARN / jasna → NG
+  [FAIL] (jasna 0.8.1) Odd width or height (1921x1080). jasna requires even dimensions for NV12 conversion ...
+  Verdict: lada-ex → WARN / jasna 0.8.1 → NG
 
   --- Fixes ---
   [PTS problem] Regenerate PTS and remux to mkv (lossless, fast):
@@ -279,7 +315,7 @@ Each file is shown like this.
 ```
 
 - The verdict is `NG` if there is any FAIL, `WARN` if WARN only, and `OK` if nothing.
-- Scope labels are not added to common items; tool-specific items get `(lada-ex)` / `(jasna)`.
+- Scope labels are not added to common items; tool-specific items get `(lada-ex)` / `(jasna <version>)`. Since jasna's criteria depend on the version, the label and the verdict line both show which version was used.
 - When multiple files are inspected, a summary is shown at the end (one line per file with the lada-ex / jasna verdicts, file name, and main problem). Verdicts are color-coded: NG=red / WARN=yellow / OK=green.
 - Repair commands are generated with the real file paths, and the output is `<original name>_<suffix>.mkv` (in the same folder).
 
@@ -291,8 +327,11 @@ Each file is shown like this.
 |---|---|---|---|
 | genpts | Missing/negative/duplicate PTS, backward DTS | Remux to mkv with `-fflags +genpts ... -c copy -avoid_negative_ts make_zero` | lossless |
 | remux | Container corruption, unsupported extension, missing metadata | Remux to mkv with `-c copy` (with an `-err_detect ignore_err` note) | lossless |
-| jasna_reencode | jasna-unsupported codec | Re-encode with `hevc_nvenc`. Adds `-vf bwdif` automatically when interlacing is detected | re-encode |
-| color_convert | Color spaces like BT.2020/HDR | Convert to BT.709 with zscale + tonemap (with a lighter variant noted for SDR sources) | re-encode |
+| jasna_reencode | jasna-unsupported codec (0.7.2), codec unsupported by `--segments` | Re-encode with `hevc_nvenc`. Adds `-vf bwdif` automatically when interlacing is detected | re-encode |
+| jasna_reencode_speed | Codec outside jasna 0.8.1's hardware-decode set | Same as above, but notes that processing still works so the fix is **optional** | re-encode |
+| even_dims | Odd width or height | Crop to even dimensions with `crop=trunc(iw/2)*2:trunc(ih/2)*2` and re-encode (padding alternative noted) | re-encode |
+| pixfmt_420 | Chroma other than 4:2:0, excess bit depth | Convert to 8-bit 4:2:0 with `-vf format=yuv420p` and re-encode | re-encode |
+| color_convert | HDR (PQ / HLG) sources | Convert to BT.709 with zscale + tonemap (with a lighter variant noted for SDR sources) | re-encode |
 | color_tag | Missing color space tag | For h264/hevc, lossless tag writing via the `*_metadata` bsf (BT.601 values also noted). For other codecs, no action if the guess is fine, re-encode only when needed | codec-dependent |
 | range_tag | Unknown color range | For h264/hevc, write `video_full_range_flag=0` via bsf. Otherwise a re-encode suggestion | codec-dependent |
 | vfr | VFR / large PTS gap | A note that remux won't fix it, plus a `-fps_mode cfr` re-encode suggestion (with a note to try as-is first) | re-encode |
@@ -317,8 +356,9 @@ Note that repair commands that copy all streams with `-map 0` also use `-map -0:
 
 - The standard full-packet scan does not decode, so it cannot detect image corruption (bitstream corruption). To detect it, use the full level.
 - It does not validate the resolution / aspect ratio of VR material (VR180/VR360/TAB) (lada-ex has no such validation logic either).
-- Audio is shown by codec name only. jasna automatically re-encodes container-incompatible audio to AAC, so no pre-check is needed.
-- The judgment criteria are based on lada-ex / jasna's requirements at the time of investigation. When the tools' specs change, the constants at the top of the script need review.
+- Beyond showing the codec name, audio is only checked at `standard` and above for packets that have neither PTS nor DTS (jasna drops those). Container-incompatible audio is re-encoded to AAC by jasna automatically, so no pre-check is needed.
+- The judgment criteria are based on lada-ex / jasna's requirements at the time of investigation. When the tools' specs change, the constants at the top of the script need review (for jasna, the version-keyed `$JasnaSpecs` table).
+- `-JasnaVersion` only offers the versions that have been investigated (0.7.2 / 0.8.1). For other versions, pick whichever behaves more closely.
 
 ---
 
