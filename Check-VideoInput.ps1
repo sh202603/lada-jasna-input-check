@@ -12,6 +12,7 @@
 #   .\Check-VideoInput.ps1 <ファイル|フォルダ>
 #   .\Check-VideoInput.ps1 D:\videos -Recurse -Target jasna -Level full
 #   .\Check-VideoInput.ps1 D:\videos -Lang en        (英語で表示。既定は OS のカルチャで自動判別)
+#   .\Check-VideoInput.ps1 D:\videos -LogFile log.txt (検査結果を 1 ファイルに保存。auto なら動画ごとに保存)
 #   Check-VideoInput.bat <ファイル|フォルダ>   (cmd から。pwsh → powershell.exe の順で自動選択)
 #
 # チェックレベル:
@@ -37,6 +38,8 @@
 #     0.8.1 : CPU デコードへ自動フォールバックするためコーデック制限は「非対応」ではなく
 #             「低速化」。BT.2020 に対応。負 PTS は破棄せず原点を 0 に平行移動する。
 #             一方で奇数解像度 (rgb_to_nv12.py の ValueError) が新たな致命傷になった
+#     0.9.1 : 入力に関わる仕様は 0.8.1 と同一 (デコーダは VALI(NVDEC) 優先に戻ったが
+#             ソフトウェアフォールバックは維持)。既定の判定基準はこのバージョン
 #     共通    : 未知の color_space タグは黙って BT.709 に読み替えられる (例外にはならず色がずれる)。
 #             duration がストリームにもコンテナにも無いとメタデータ読み取りで KeyError
 
@@ -53,10 +56,10 @@ param(
 
   # 判定基準とする jasna のバージョン。0.8.1 でメディア層が PyAV に移行し制約が大きく変わった。
   # -Target が jasna / both のときのみ意味を持つ
-  [ValidateSet("0.7.2", "0.8.1")]
-  [string]$JasnaVersion = "0.8.1",
+  [ValidateSet("0.7.2", "0.8.1", "0.9.1")]
+  [string]$JasnaVersion = "0.9.1",
 
-  # jasna の --segments (スマートレンダリング) 使用を前提に厳格な追加チェックを行う (0.8.1 のみ)
+  # jasna の --segments (スマートレンダリング) 使用を前提に厳格な追加チェックを行う (0.8.1 以降)
   [switch]$Segments,
 
   # 表示言語。auto は OS のカルチャで日本語/英語を判別する
@@ -70,6 +73,10 @@ param(
 
   [string]$FixScript,
 
+  # 検査結果ログの出力先。"auto" を指定すると動画ごとに隣へ <動画名>.check.txt を出す。
+  # それ以外はパスとして扱い、実行全体を 1 ファイルにまとめる
+  [string]$LogFile,
+
   # バージョンを表示して終了する (検査は行わない)
   [Parameter(ParameterSetName="Version", Mandatory=$true)]
   [switch]$Version
@@ -78,7 +85,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ツールのバージョン。リリースごとに更新する (README.md / README.en.md のバージョン行も同時に更新すること)
-$ToolVersion = "1.2.0"
+$ToolVersion = "1.3.0"
 
 # -Version: ffprobe/ffmpeg の検出より前に処理する (ツール未導入でも表示できるように)
 if ($Version) {
@@ -256,6 +263,15 @@ $Strings = @{
     fixscript_h4      = '# 同一ファイルに複数の対処がある場合、それぞれ別の出力ファイルを作る。必要なものだけ残すこと'
     fixscript_none    = '# 対処が必要なファイルはありませんでした'
     fixscript_written = '対処コマンドを出力しました: {0} ({1} ファイル分)'
+
+    # --- 検査結果ログ書き出し ---
+    log_header       = 'Check-VideoInput {0} — 検査ログ  生成日時: {1}'
+    log_path         = '対象パス: {0}'
+    log_cond         = 'Target={0} / Level={1}'
+    log_exit         = '終了コード: {0} (0=問題なし / 1=WARN のみ / 2=FAIL あり)'
+    log_written      = '検査ログを出力しました: {0}'
+    log_written_auto = '検査ログを出力しました: {0} ファイル分 (各動画の隣に .check.txt)'
+    log_err          = 'WARNING: 検査ログを書き出せませんでした: {0}'
   }
   en = @{
     # --- detection messages ---
@@ -416,6 +432,15 @@ $Strings = @{
     fixscript_h4      = '# When one file has multiple fixes, each produces a separate output file. Keep only the ones you need'
     fixscript_none    = '# No files needed fixing'
     fixscript_written = 'Wrote fix commands: {0} (for {1} file(s))'
+
+    # --- check-log output ---
+    log_header       = 'Check-VideoInput {0} — check log  Generated: {1}'
+    log_path         = 'Target path: {0}'
+    log_cond         = 'Target={0} / Level={1}'
+    log_exit         = 'Exit code: {0} (0=no problems / 1=WARN only / 2=FAIL present)'
+    log_written      = 'Wrote check log: {0}'
+    log_written_auto = 'Wrote check logs for {0} file(s) (.check.txt next to each video)'
+    log_err          = 'WARNING: Failed to write the check log: {0}'
   }
 }
 
@@ -497,6 +522,13 @@ $JasnaSpecs = @{
     HasSegments   = $true
   }
 }
+# 0.9.1: 入力に関わる仕様は 0.8.1 と同一のため同じテーブルを共有する (v0.8.1..v0.9.1 のソース比較による)。
+#   - デコーダは VALI(NVDEC) → PyAV hwaccel → ソフトウェアの多段フォールバックに戻ったが、
+#     フォールバック自体は維持されているためコーデック制限は依然 WARN (低速化) で FAIL ではない
+#   - 偶数解像度の要求 (rgb_to_yuv.py:155)、色空間の BT.709 読み替え、duration 欠落の KeyError、
+#     start_pts 欠落の GUI TypeError、--segments のゲート (splice.py 無変更) はいずれも変わらず
+#   - 新規の入力制約は無し (追加されたのは LUT/シャープ/シーン検出/fmp4 など処理側のオプション)
+$JasnaSpecs["0.9.1"] = $JasnaSpecs["0.8.1"]
 $JasnaSpec = $JasnaSpecs[$JasnaVersion]
 
 # jasna のフォルダ走査対象拡張子 (media_files.py:7-9)。単一ファイル指定時はこの検査を通らない
@@ -1062,15 +1094,104 @@ function Get-RelevantFixKeys($Result) {
     Select-Object -ExpandProperty FixKey -Unique
 }
 
+# =====================================================================
+# 検査結果ログ (-LogFile)
+# =====================================================================
+# 表示は Write-Host (情報ストリーム) で行っているため、cmd の > や PowerShell の
+# パイプではファイルに残せない。ここでコンソールとログの二重出力を担い、
+# ウィンドウを閉じた後でも結果を読み返せるようにする。
+#   -LogFile <パス> : 実行全体を 1 ファイルにまとめる
+#   -LogFile auto   : 動画ごとに <動画名>.check.txt を隣に置く
+#                     (動画と完全同名の .txt は既存の字幕/メモを壊しうるため .check.txt にする)
+$script:LogMode    = "none"    # none / single / auto
+$script:LogPath    = $null     # single モードの出力先 (フルパス)
+$script:LogBuffer  = [System.Collections.Generic.List[string]]::new()
+$script:LogPending = ""        # -NoNewline で書かれた行の組み立て途中バッファ
+$script:LogStarted = $false    # single モードで初回書き込み済みか (2 回目以降は追記)
+$script:LogCount   = 0         # auto モードで書き出したファイル数
+
+if ($LogFile) {
+  if ($LogFile -eq "auto") {
+    $script:LogMode = "auto"
+  } else {
+    $script:LogMode = "single"
+    $script:LogPath = if ([System.IO.Path]::IsPathRooted($LogFile)) { $LogFile }
+                      else { Join-Path (Get-Location).Path $LogFile }
+  }
+}
+
+# コンソールへ出しつつ、ログ有効時は同じ内容を色なしでバッファに積む。
+# 表示とログを別々に組み立てると内容がずれるため、出力は必ずこの関数を通す
+function Write-Out([string]$Text = "", [string]$Color, [switch]$NoNewline) {
+  if ($Color) { Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline }
+  else        { Write-Host $Text -NoNewline:$NoNewline }
+
+  if ($script:LogMode -eq "none") { return }
+  if ($NoNewline) { $script:LogPending += $Text }
+  else {
+    $script:LogBuffer.Add($script:LogPending + $Text)
+    $script:LogPending = ""
+  }
+}
+
+# ログにだけ載せる行 (ヘッダなど、コンソールには出さないもの)
+function Add-LogLine([string]$Text = "") {
+  if ($script:LogMode -eq "none") { return }
+  $script:LogBuffer.Add($Text)
+}
+
+# 検査条件のヘッダ。single モードは実行の先頭に 1 回、auto モードは各ファイルの先頭に付ける
+function Add-LogHeader([string]$TargetPath) {
+  Add-LogLine ((T 'log_header') -f $ToolVersion, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+  if ($TargetPath) { Add-LogLine ((T 'log_path') -f $TargetPath) }
+  if ($script:LogMode -eq "auto") {
+    Add-LogLine ((T 'log_cond') -f $Target, $Level)
+    if ($Target -in @("jasna", "both")) {
+      Add-LogLine ((T 'scan_jasna_spec') -f $JasnaVersion, (Get-SegmentsNote))
+    }
+  }
+}
+
+# バッファをファイルへ書き出してクリアする。
+# single モードは 1 ファイル検査するごとに追記する (フォルダ × -Level full は長時間かかるため、
+# 途中で中断・クローズされてもそこまでの結果が残るようにする)。
+# -Overwrite は auto モード用 (毎回別のファイルを新規作成する)。
+# 日本語を含むため -FixScript と同じく UTF-8 BOM 付きで保存する。
+function Save-LogBuffer([string]$OutPath, [switch]$Overwrite) {
+  if ($script:LogPending) {
+    $script:LogBuffer.Add($script:LogPending)
+    $script:LogPending = ""
+  }
+  if ($script:LogBuffer.Count -eq 0) { return }
+
+  $content = ($script:LogBuffer -join "`r`n") + "`r`n"
+  $enc = New-Object System.Text.UTF8Encoding($true)
+  try {
+    if ($Overwrite -or -not $script:LogStarted) {
+      [System.IO.File]::WriteAllText($OutPath, $content, $enc)
+      $script:LogStarted = $true
+    } else {
+      [System.IO.File]::AppendAllText($OutPath, $content, $enc)
+    }
+  } catch {
+    # 書き込み権限が無い / 読み取り専用メディア等。検査自体は続行させ、警告を出してログを止める
+    Write-Host ((T 'log_err') -f $_.Exception.Message) -ForegroundColor Yellow
+    $script:LogBuffer.Clear()
+    $script:LogMode = "none"
+    return
+  }
+  $script:LogBuffer.Clear()
+}
+
 function Write-FileReport($Result) {
-  Write-Host ""
-  Write-Host "=== $($Result.File.Name) ===" -ForegroundColor Cyan
+  Write-Out ""
+  Write-Out "=== $($Result.File.Name) ===" Cyan
   if ($Result.MetaLine) {
-    Write-Host "  $(T 'label_metadata'): $($Result.MetaLine)"
+    Write-Out "  $(T 'label_metadata'): $($Result.MetaLine)"
   }
 
   if ($Result.Findings.Count -eq 0) {
-    Write-Host "  [OK]   $(T 'no_problems')" -ForegroundColor Green
+    Write-Out "  [OK]   $(T 'no_problems')" Green
   } else {
     foreach ($f in $Result.Findings) {
       $tag = if ($f.Severity -eq "FAIL") { "[FAIL]" } else { "[WARN]" }
@@ -1081,7 +1202,7 @@ function Write-FileReport($Result) {
         "jasna" { (T 'scope_jasna') -f $JasnaVersion }
         default { "" }
       }
-      Write-Host "  $tag $scopeLabel$($f.Message)" -ForegroundColor $color
+      Write-Out "  $tag $scopeLabel$($f.Message)" $color
     }
   }
 
@@ -1089,17 +1210,17 @@ function Write-FileReport($Result) {
   $verdictParts = @()
   if ($Target -in @("lada", "both"))  { $verdictParts += "$(T 'label_lada') → $(Get-VerdictLabel (Get-Verdict $Result 'lada'))" }
   if ($Target -in @("jasna", "both")) { $verdictParts += "$((T 'label_jasna') -f $JasnaVersion) → $(Get-VerdictLabel (Get-Verdict $Result 'jasna'))" }
-  Write-Host "  $(T 'label_verdict'): $($verdictParts -join ' / ')" -ForegroundColor White
+  Write-Out "  $(T 'label_verdict'): $($verdictParts -join ' / ')" White
 
   # 対処コマンド (対象ツールに関係する findings の FixKey を重複排除して提示)
   $fixKeys = Get-RelevantFixKeys $Result
   if ($fixKeys) {
-    Write-Host ""
-    Write-Host "  $(T 'label_fixes')" -ForegroundColor Magenta
+    Write-Out ""
+    Write-Out "  $(T 'label_fixes')" Magenta
     foreach ($key in $fixKeys) {
       $text = Get-FixSuggestion $key $Result
       if ($text) {
-        foreach ($line in ($text -split "`n")) { Write-Host "  $line" }
+        foreach ($line in ($text -split "`n")) { Write-Out "  $line" }
       }
     }
   }
@@ -1155,8 +1276,8 @@ function Write-FixScriptFile($Results, [string]$OutPath) {
   $content = ($sb -join "`r`n") + "`r`n"
   $enc = New-Object System.Text.UTF8Encoding($true)  # BOM 付き
   [System.IO.File]::WriteAllText($full, $content, $enc)
-  Write-Host ""
-  Write-Host ((T 'fixscript_written') -f $full, $count) -ForegroundColor Green
+  Write-Out ""
+  Write-Out ((T 'fixscript_written') -f $full, $count) Green
 }
 
 # =====================================================================
@@ -1184,21 +1305,40 @@ if ($item.PSIsContainer) {
   $files = @($item)
 }
 
-Write-Host ((T 'scan_target') -f $files.Count, $Target, $Level) -ForegroundColor White
+# single モードのログは実行の先頭にヘッダを置く (auto モードはファイルごとに付ける)
+if ($script:LogMode -eq "single") { Add-LogHeader $item.FullName }
+
+Write-Out ((T 'scan_target') -f $files.Count, $Target, $Level) White
 if ($Target -in @("jasna", "both")) {
-  Write-Host ((T 'scan_jasna_spec') -f $JasnaVersion, (Get-SegmentsNote)) -ForegroundColor White
+  Write-Out ((T 'scan_jasna_spec') -f $JasnaVersion, (Get-SegmentsNote)) White
 }
 
 $results = @()
 foreach ($f in $files) {
+  # auto モードは 1 ファイル 1 ログなので、検査ごとにバッファを作り直す
+  # (ループ前のスキャン情報行は個々のログには要らないためここで捨てる)
+  if ($script:LogMode -eq "auto") {
+    $script:LogBuffer.Clear()
+    $script:LogPending = ""
+    Add-LogHeader $f.FullName
+  }
+
   $results += Test-VideoFile $f
   Write-FileReport $results[-1]
+
+  # ログはファイル単位で書き出す。長時間の走査を途中で閉じてもそこまでは残る
+  if ($script:LogMode -eq "auto") {
+    Save-LogBuffer (Join-Path $f.DirectoryName "$($f.Name).check.txt") -Overwrite
+    if ($script:LogMode -eq "auto") { $script:LogCount++ }   # 書き出し失敗時は none に落ちる
+  } elseif ($script:LogMode -eq "single") {
+    Save-LogBuffer $script:LogPath
+  }
 }
 
 # --- サマリ (複数ファイル時のみ) ---
 if ($results.Count -gt 1) {
-  Write-Host ""
-  Write-Host (T 'summary_header') -ForegroundColor Cyan
+  Write-Out ""
+  Write-Out (T 'summary_header') Cyan
   # Format-Table は使わない。長い日本語ファイル名がコンソール幅を使い切ると
   # AutoSize が判定列を黙って切り捨てるため。判定を先頭に置き 1 ファイル 1 行で出す
   # 判定ラベルの埋め幅は言語で変わる (英語の CAUTION 等は日本語より長い) ため、
@@ -1206,21 +1346,21 @@ if ($results.Count -gt 1) {
   $padW = (@((T 'verdict_ok'), (T 'verdict_warn'), (T 'verdict_fail')) |
            Measure-Object -Property Length -Maximum).Maximum + 1
   foreach ($res in $results) {
-    Write-Host "  " -NoNewline
+    Write-Out "  " -NoNewline
     if ($Target -in @("lada", "both")) {
       $v = Get-Verdict $res "lada"
-      Write-Host "$(T 'label_lada'):" -NoNewline
-      Write-Host (Get-VerdictLabel $v).PadRight($padW) -NoNewline -ForegroundColor (Get-VerdictColor $v)
+      Write-Out "$(T 'label_lada'):" -NoNewline
+      Write-Out (Get-VerdictLabel $v).PadRight($padW) (Get-VerdictColor $v) -NoNewline
     }
     if ($Target -in @("jasna", "both")) {
       $v = Get-Verdict $res "jasna"
-      Write-Host "$((T 'label_jasna') -f $JasnaVersion):" -NoNewline
-      Write-Host (Get-VerdictLabel $v).PadRight($padW) -NoNewline -ForegroundColor (Get-VerdictColor $v)
+      Write-Out "$((T 'label_jasna') -f $JasnaVersion):" -NoNewline
+      Write-Out (Get-VerdictLabel $v).PadRight($padW) (Get-VerdictColor $v) -NoNewline
     }
-    Write-Host " $($res.File.Name)"
+    Write-Out " $($res.File.Name)"
     $first = $res.Findings | Where-Object Severity -eq "FAIL" | Select-Object -First 1
     if (-not $first) { $first = $res.Findings | Select-Object -First 1 }
-    if ($first) { Write-Host "      $($first.Message)" -ForegroundColor DarkGray }
+    if ($first) { Write-Out "      $($first.Message)" DarkGray }
   }
 }
 
@@ -1235,6 +1375,20 @@ if ($Target -in @("lada", "both"))  { $relevantScopes += "lada" }
 if ($Target -in @("jasna", "both")) { $relevantScopes += "jasna" }
 $allRelevant = $results.Findings | Where-Object { $_.Scope -in $relevantScopes }
 
-if ($allRelevant | Where-Object { $_.Severity -eq "FAIL" }) { exit 2 }
-if ($allRelevant | Where-Object { $_.Severity -eq "WARN" }) { exit 1 }
-exit 0
+$exitCode = 0
+if     ($allRelevant | Where-Object { $_.Severity -eq "FAIL" }) { $exitCode = 2 }
+elseif ($allRelevant | Where-Object { $_.Severity -eq "WARN" }) { $exitCode = 1 }
+
+# --- 検査結果ログの締め (サマリと終了コードを書き足して閉じる) ---
+if ($script:LogMode -eq "single") {
+  Add-LogLine ""
+  Add-LogLine ((T 'log_exit') -f $exitCode)
+  Save-LogBuffer $script:LogPath
+  Write-Host ""
+  Write-Host ((T 'log_written') -f $script:LogPath) -ForegroundColor Green
+} elseif ($script:LogMode -eq "auto" -and $script:LogCount -gt 0) {
+  Write-Host ""
+  Write-Host ((T 'log_written_auto') -f $script:LogCount) -ForegroundColor Green
+}
+
+exit $exitCode

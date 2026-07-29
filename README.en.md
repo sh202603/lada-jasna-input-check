@@ -2,11 +2,11 @@
 
 [日本語](README.md) | **English**
 
-Version: 1.2.0
+Version: 1.3.0
 
 A PowerShell tool that inspects videos before you feed them to [lada-ex](https://codeberg.org/comman/lada-ex) / [jasna](https://github.com/Kruk2/jasna).
 
-It uses ffprobe / ffmpeg to examine a video's metadata, PTS/DTS, and bitstream, checking whether it matches both tools' requirements (container / codec / color space) and whether the PTS is broken (missing, negative, duplicate, going backward, or with large gaps). When a problem is found, it explains the cause and presents a **ready-to-copy-and-paste ffmpeg repair command**. (It can also write the repair commands out to a file.)
+It uses ffprobe / ffmpeg to examine a video's metadata, PTS/DTS, and bitstream, checking whether it matches both tools' requirements (container / codec / color space) and whether the PTS is broken (missing, negative, duplicate, going backward, or with large gaps). When a problem is found, it explains the cause and presents a **ready-to-copy-and-paste ffmpeg repair command**. (It can also write the repair commands out to a file, and save the inspection results as a log.)
 
 The goal is to catch videos that fail to process, end up out of sync, or have wrong colors — before you run the actual processing.
 
@@ -150,11 +150,12 @@ This wrapper works as follows.
 | `-Path` (position 0, required) | file or folder | — | Specifying a folder inspects all videos with target extensions at once |
 | `-Target` | `lada` / `jasna` / `both` | `both` | The tool to judge against. Affects the verdict line, fixes, and exit code |
 | `-Level` | `quick` / `standard` / `full` | `standard` | Inspection depth (see table below) |
-| `-JasnaVersion` | `0.7.2` / `0.8.1` | `0.8.1` | The jasna version to judge against. jasna 0.8.1 moved its media layer to PyAV, which changed the input constraints substantially. Only meaningful when `-Target` is `jasna` or `both` |
-| `-Segments` | switch | off | Adds the stricter checks that apply when jasna's `--segments` (smart rendering) is used. Only active on 0.8.1; a no-op on 0.7.2 |
+| `-JasnaVersion` | `0.7.2` / `0.8.1` / `0.9.1` | `0.9.1` | The jasna version to judge against. jasna 0.8.1 moved its media layer to PyAV, which changed the input constraints substantially (0.9.1 has the same input constraints as 0.8.1). Only meaningful when `-Target` is `jasna` or `both` |
+| `-Segments` | switch | off | Adds the stricter checks that apply when jasna's `--segments` (smart rendering) is used. Active on 0.8.1 / 0.9.1; a no-op on 0.7.2 |
 | `-Lang` | `ja` / `en` / `auto` | `auto` | Display language. `auto` shows Japanese if the OS culture is Japanese, otherwise English (the verdict and exit code are language-independent) |
 | `-Recurse` | switch | off | Also include subdirectories of the folder |
 | `-FixScript` | output file path | — | Writes the shown repair commands to a single file you can run later as a batch (see below) |
+| `-LogFile` | output file path or `auto` | — | Saves the on-screen check results to a text file. A path collects the whole run into one file; `auto` writes `<video name>.check.txt` next to each video (see below) |
 | `-FFprobePath` / `-FFmpegPath` | path | auto-detect | Explicitly specify the location of ffprobe / ffmpeg |
 | `-Version` | switch | — | Print the tool version and exit (no inspection; works even without ffmpeg / ffprobe) |
 
@@ -175,6 +176,31 @@ Adding `-FixScript <output file>` writes the repair commands shown on screen int
   - **Be careful with editors that always open files as Shift_JIS (CP932).** Most editors auto-detect UTF-8 from the BOM or content, but if one reads it as Shift_JIS without detecting, characters break and the BOM may appear as garbage characters at the start of the first line. In that case, **reopen the file specifying UTF-8 encoding**.
   - Garbage characters are not limited to comments. **If an input file name contains non-ASCII characters, the `ffmpeg ...` command lines also contain those paths** (the input path and the output `<original name>_<suffix>.mkv`). Since the whole file is UTF-8 (with BOM), running it in PowerShell (5.1 or 7) passes the paths to ffmpeg correctly.
   - When you edit and **re-save, keep it as UTF-8.** If you re-save as Shift_JIS, PowerShell 7 (which reads it as the default UTF-8) will corrupt the paths and execution will fail. (PowerShell 5.1 reads it as CP932 so Shift_JIS works there, but UTF-8 is recommended to avoid environment differences.)
+
+### Saving the results to a file (`-LogFile`)
+
+The results shown on screen are gone once the window is closed. Adding `-LogFile` saves **exactly what is printed** (metadata, findings, verdicts, repair commands, summary) to a text file so you can review it later.
+
+```powershell
+# Collect the whole run into a single file (one file even for a folder scan)
+.\Check-VideoInput.ps1 D:\videos -Recurse -LogFile D:\videos\check.txt
+
+# Write <video name>.check.txt next to each video
+.\Check-VideoInput.ps1 D:\videos -Recurse -LogFile auto
+```
+
+| Value | Output | When to use |
+|---|---|---|
+| `-LogFile <path>` | The whole run in the single file you specify (relative paths are resolved against the current directory) | The usual choice. Even a folder scan produces just one file |
+| `-LogFile auto` | `<video name>.check.txt` in the same folder as each video (e.g. `sample.mp4` → `sample.mp4.check.txt`) | When you want the result to travel with the video. Produces one text file per video |
+
+- The log starts with the tool version, generation time, and inspection settings (`-Target` / `-Level` / jasna spec version). With `-LogFile <path>` the exit code is recorded at the end as well.
+- **The log is flushed after each inspected file.** Even if a long run (e.g. a folder scan with `-Level full`) is interrupted or the window is closed, the results up to that point remain in the log.
+- Re-running with the same output path **overwrites** the log (it does not append).
+- `auto` writes `<video name>.check.txt`, not `<video name>.txt`, so that an existing `.txt` with the same name as the video (subtitles, notes) is never overwritten.
+- If writing fails (a read-only location, for example), a warning is shown and the inspection continues. Verdicts and exit codes are not affected by `-LogFile`.
+- The file is saved as UTF-8 (with BOM). Editors that always open files as Shift_JIS will show broken characters; reopen the file specifying UTF-8.
+- This is not the same as `-FixScript`: `-FixScript` collects **only the ffmpeg commands, ready to run**, while `-LogFile` records **the inspection results themselves**. Both can be specified at once.
 
 ### Inspection levels
 
@@ -255,21 +281,23 @@ Runs `ffmpeg -v error -i <file> -map 0:v:0 -f null -`, and if there is any error
 
 ### jasna-specific judgments
 
-jasna 0.8.1 replaced its media layer wholesale (python_vali/PyNvVideoCodec → **PyAV**), which changed the input constraints substantially. `-JasnaVersion` selects which set of criteria to apply (default `0.8.1`).
+jasna 0.8.1 replaced its media layer wholesale (python_vali/PyNvVideoCodec → **PyAV**), which changed the input constraints substantially. `-JasnaVersion` selects which set of criteria to apply (default `0.9.1`).
 
-| Item | 0.7.2 | 0.8.1 | Rationale |
+**0.9.1 has the same input constraints as 0.8.1** (established by comparing the v0.8.1 and v0.9.1 sources). 0.9.1 brought back VALI (NVDEC) as the primary decoder, but the `VALI → PyAV hardware decode → software decode` fallback chain is intact, so codec limitations still mean "slower", not "unsupported". The even-dimension requirement, the color-space coercion, the `duration` handling, and the `--segments` gates are unchanged. What 0.9.1 added (LUT, sharpening, scene detection, fMP4 output) is all on the processing side and does not affect whether an input is accepted.
+
+| Item | 0.7.2 | 0.8.1 / 0.9.1 | Rationale |
 |---|---|---|---|
-| Codec other than h264/hevc/vp9/av1 | **FAIL** | WARN | 0.7.2 requires NVDEC and cannot process it. 0.8.1 falls back to CPU decoding automatically, so the only cost is speed |
+| Codec other than h264/hevc/vp9/av1 | **FAIL** | WARN | 0.7.2 requires NVDEC and cannot process it. 0.8.1 and later fall back to CPU decoding automatically, so the only cost is speed |
 | `color_space` not recognized | WARN | WARN | 0.8.1 added BT.2020 support. **In both versions an unknown tag is silently coerced to BT.709 rather than raising**, so the real cost is shifted colors, not a crash |
 | `color_space` not set | WARN | WARN | Same as above (silently treated as BT.709) |
-| Odd width or height | — | **FAIL** | 0.8.1's NV12 conversion requires even dimensions and aborts **after encoding has started** |
+| Odd width or height | — | **FAIL** | The NV12 / P010 conversion in 0.8.1 and later requires even dimensions and aborts **after encoding has started** |
 | `duration` unavailable | **FAIL** | **FAIL** | Aborts with a `KeyError` while reading metadata |
 | `start_pts` missing | WARN | WARN | The GUI preview aborts with a `TypeError` (CLI runs still work) |
 | HDR (PQ / HLG) | WARN | WARN | No tone mapping; the transfer characteristics pass straight through, so output is blown out or crushed |
 | Interlaced | WARN | WARN | jasna does not deinterlace |
 | Chroma other than 4:2:0 (4:2:2 / 4:4:4 / RGB) | WARN | WARN | Subsampled to 4:2:0, losing color resolution |
 | Bit depth above 10-bit | WARN | WARN | Reduced to 10-bit |
-| Negative-PTS packets | WARN | WARN | 0.7.2 drops them (missing head). 0.8.1 keeps them and shifts the origin to 0 |
+| Negative-PTS packets | WARN | WARN | 0.7.2 drops them (missing head). 0.8.1 and later keep them and shift the origin to 0 |
 | Subtitle / data / attachment / chapter streams | WARN | WARN | Lost in the output (only the first video stream plus audio are muxed) |
 | Multiple video streams | WARN | WARN | Only the first one is processed |
 | Audio packets without PTS/DTS | WARN | WARN | Those packets are dropped (checked at `standard` and above) |
@@ -291,7 +319,7 @@ jasna's `--segments` (smart rendering) is far stricter than the normal path, and
 | Frame rate | CFR required (`r_frame_rate` and `avg_frame_rate` within 0.1% — stricter than the common VFR check) |
 | Input extension | Output containers are limited to `.mp4` / `.mov` / `.mkv`, so anything else requires specifying the output extension explicitly |
 
-0.7.2 has no `--segments` at all, so combining `-Segments` with `-JasnaVersion 0.7.2` adds nothing.
+0.7.2 has no `--segments` at all, so combining `-Segments` with `-JasnaVersion 0.7.2` adds nothing. The gates are identical between 0.8.1 and 0.9.1.
 
 ---
 
@@ -301,13 +329,13 @@ Each file is shown like this.
 
 ```
 Checking 1 file(s) / Target=both / Level=quick
-jasna spec version: 0.8.1
+jasna spec version: 0.9.1
 
 === sample.mp4 ===
   Metadata: mp4 / h264 / 1921x1080 / yuv420p / 29.97fps / 0:12:34 / audio: aac
   [WARN] (lada-ex) Negative start PTS (first_pts=-2002). ...
-  [FAIL] (jasna 0.8.1) Odd width or height (1921x1080). jasna requires even dimensions for NV12 conversion ...
-  Verdict: lada-ex → WARN / jasna 0.8.1 → NG
+  [FAIL] (jasna 0.9.1) Odd width or height (1921x1080). jasna requires even dimensions for NV12 conversion ...
+  Verdict: lada-ex → WARN / jasna 0.9.1 → NG
 
   --- Fixes ---
   [PTS problem] Regenerate PTS and remux to mkv (lossless, fast):
@@ -328,7 +356,7 @@ jasna spec version: 0.8.1
 | genpts | Missing/negative/duplicate PTS, backward DTS | Remux to mkv with `-fflags +genpts ... -c copy -avoid_negative_ts make_zero` | lossless |
 | remux | Container corruption, unsupported extension, missing metadata | Remux to mkv with `-c copy` (with an `-err_detect ignore_err` note) | lossless |
 | jasna_reencode | jasna-unsupported codec (0.7.2), codec unsupported by `--segments` | Re-encode with `hevc_nvenc`. Adds `-vf bwdif` automatically when interlacing is detected | re-encode |
-| jasna_reencode_speed | Codec outside jasna 0.8.1's hardware-decode set | Same as above, but notes that processing still works so the fix is **optional** | re-encode |
+| jasna_reencode_speed | Codec outside the hardware-decode set of jasna 0.8.1 and later | Same as above, but notes that processing still works so the fix is **optional** | re-encode |
 | even_dims | Odd width or height | Crop to even dimensions with `crop=trunc(iw/2)*2:trunc(ih/2)*2` and re-encode (padding alternative noted) | re-encode |
 | pixfmt_420 | Chroma other than 4:2:0, excess bit depth | Convert to 8-bit 4:2:0 with `-vf format=yuv420p` and re-encode | re-encode |
 | color_convert | HDR (PQ / HLG) sources | Convert to BT.709 with zscale + tonemap (with a lighter variant noted for SDR sources) | re-encode |
@@ -358,7 +386,7 @@ Note that repair commands that copy all streams with `-map 0` also use `-map -0:
 - It does not validate the resolution / aspect ratio of VR material (VR180/VR360/TAB) (lada-ex has no such validation logic either).
 - Beyond showing the codec name, audio is only checked at `standard` and above for packets that have neither PTS nor DTS (jasna drops those). Container-incompatible audio is re-encoded to AAC by jasna automatically, so no pre-check is needed.
 - The judgment criteria are based on lada-ex / jasna's requirements at the time of investigation. When the tools' specs change, the constants at the top of the script need review (for jasna, the version-keyed `$JasnaSpecs` table).
-- `-JasnaVersion` only offers the versions that have been investigated (0.7.2 / 0.8.1). For other versions, pick whichever behaves more closely.
+- `-JasnaVersion` only offers the versions that have been investigated (0.7.2 / 0.8.1 / 0.9.1). For other versions, pick whichever behaves more closely (use 0.9.1 for any 0.9.x).
 
 ---
 
