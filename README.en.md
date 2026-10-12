@@ -2,7 +2,7 @@
 
 [日本語](README.md) | **English**
 
-Version: 1.3.0
+Version: 1.4.0
 
 A PowerShell tool that inspects videos before you feed them to [lada-ex](https://codeberg.org/comman/lada-ex) / [jasna](https://github.com/Kruk2/jasna).
 
@@ -225,9 +225,9 @@ When narrowed with `-Target`, findings specific to the excluded tool do not affe
 
 ### Folder-scan target extensions
 
-This is lada-ex's supported list plus common video extensions.
+This is the set of extensions picked up by lada-ex's folder scan (see below) plus common video extensions.
 
-`.asf .avi .m4v .mkv .mov .mp4 .mpeg .mpg .ts .wmv .webm .rmvb .vob .3gp .flv .m2ts .mts`
+`.asf .avi .m4v .mkv .mov .mp4 .mpeg .mpg .ts .m2ts .mts .wmv .webm .3gp .flv .rmvb .vob`
 
 (If you specify a single file, it is inspected regardless of its extension.)
 
@@ -243,7 +243,7 @@ This is lada-ex's supported list plus common video extensions.
 | 2 | ffprobe fails to parse (container corruption) | FAIL | remux |
 | 3 | No video stream | FAIL | — |
 | 4 | Cannot determine frame rate (e.g. `r_frame_rate` denominator 0) | FAIL | remux |
-| 5 | Cannot determine duration | WARN | remux |
+| 5 | Cannot determine duration | FAIL | remux |
 | 6 | Cannot determine resolution | FAIL | — |
 | 7 | Possible VFR (`r_frame_rate` and `avg_frame_rate` differ by more than 1%) | WARN | vfr |
 | 8 | Interlaced (`field_order` other than progressive/unknown) | WARN | interlace |
@@ -261,6 +261,8 @@ Parses the pts/dts of every packet in the video stream via a CSV stream.
 | Duplicate PTS | FAIL | Same-time frames mixed in = bad mux (a few often pass, many cause stutter/desync) |
 | DTS going backward | FAIL | Breaks decode order; seeking/decoding becomes unstable |
 | Large PTS gap after sorting | WARN (lada) | A known cause of AV desync in lada-ex |
+| Header FPS vs. measured FPS mismatch (`avg_frame_rate` and `packets / duration` differ by more than 0.05) | WARN (lada) | lada-ex distrusts the header and processes with the measured FPS, so the output fps may change |
+| Corrupted duration (measured FPS above 120 while the header FPS is 120 or less) | WARN (lada) | lada-ex treats the duration as corrupted and corrects it to `packets / header FPS` |
 
 The large-gap threshold is `max(median frame interval × 4, 0.5 s)`. PTS is normally non-monotonic because of B-frames, so monotonicity is judged on DTS, and PTS is judged on the gap after sorting.
 
@@ -270,14 +272,18 @@ Runs `ffmpeg -v error -i <file> -map 0:v:0 -f null -`, and if there is any error
 
 ### lada-ex-specific judgments
 
+The criteria are based on the lada-ex 0.12.1-dev source (main as of 2026-10-12).
+
 | Item | Verdict | Rationale |
 |---|---|---|
-| Extension outside the whitelist | FAIL | Not in lada-ex's supported extension list |
-| `first_pts < -1000` | WARN | Forced to VAAPI to avoid an Intel QSV driver crash |
-| `first_pts < 0` / `start_time < 0` | WARN | Triggers a TorchCodec → PyAV fallback (slower) |
-| `time_base == 1/10000000` | WARN | Incompatible with TorchCodec exact seek, so it falls back to PyAV |
-| `color_range` unknown | WARN | Falls back to PyAV when it cannot be inferred |
+| Extension not picked up by the folder scan | WARN | The lada-ex CLI has no extension list. For folder input it only processes files that Python's `mimetypes` classifies as `video/*` (OS-dependent; on Windows `.flv .rmvb .vob` are excluded). Passing a file individually works regardless of extension, so this is detected only for folder input |
+| Codec outside the NVDEC set (other than h264 / hevc / av1 / vp9 / vp8 / mpeg2video / mpeg4 / mjpeg) | WARN | TorchCodec cannot be used, so it falls back to PyAV CPU decoding. Processing still works, so the fix is optional |
+| `first_pts < -1000` | WARN | In addition to the PyAV fallback, Intel QSV is forced to VAAPI to avoid a driver crash |
+| `first_pts < 0` / `start_time < 0` | WARN | Triggers a TorchCodec → PyAV fallback (slower). The PyAV reader also drops frames with negative PTS, so that span is missing from the output (with `--torch-reader-mode lowlevel` it stays on TorchCodec) |
+| `time_base == 1/10000000` | WARN | Incompatible with TorchCodec exact seek, so it falls back to PyAV (stays on TorchCodec with `--torch-reader-mode lowlevel`) |
+| `color_range` unknown and not inferable as limited range from `pix_fmt` | WARN | If `pix_fmt` is `yuv*`, lada-ex infers limited (tv) range and stays on TorchCodec, so it is not flagged. `yuvj*` (inferred full range) and non-yuv formats (rgb / gray, etc.) fall back to PyAV |
 | VFR + large PTS gap | WARN | A known cause of AV desync |
+| Header FPS vs. measured FPS mismatch / corrupted duration | WARN | Checked at `standard` and above (see the previous section) |
 
 ### jasna-specific judgments
 
@@ -291,7 +297,6 @@ jasna 0.8.1 replaced its media layer wholesale (python_vali/PyNvVideoCodec → *
 | `color_space` not recognized | WARN | WARN | 0.8.1 added BT.2020 support. **In both versions an unknown tag is silently coerced to BT.709 rather than raising**, so the real cost is shifted colors, not a crash |
 | `color_space` not set | WARN | WARN | Same as above (silently treated as BT.709) |
 | Odd width or height | — | **FAIL** | The NV12 / P010 conversion in 0.8.1 and later requires even dimensions and aborts **after encoding has started** |
-| `duration` unavailable | **FAIL** | **FAIL** | Aborts with a `KeyError` while reading metadata |
 | `start_pts` missing | WARN | WARN | The GUI preview aborts with a `TypeError` (CLI runs still work) |
 | HDR (PQ / HLG) | WARN | WARN | No tone mapping; the transfer characteristics pass straight through, so output is blown out or crushed |
 | Interlaced | WARN | WARN | jasna does not deinterlace |
@@ -303,7 +308,7 @@ jasna 0.8.1 replaced its media layer wholesale (python_vali/PyNvVideoCodec → *
 | Audio packets without PTS/DTS | WARN | WARN | Those packets are dropped (checked at `standard` and above) |
 | Extension outside the folder-scan list | WARN | WARN | jasna's folder scan only covers `.mp4 .mkv .avi .mov .wmv .flv .webm`. Passing the file individually still works (detected only for folder input) |
 
-> Because a missing `duration` is now a FAIL, files that previously exited with code 1 may now exit with 2.
+> A missing `duration` is not jasna-specific: lada-ex also aborts with a `KeyError`, so since 1.4.0 it is a common check (FAIL).
 
 ### Extra checks for `--segments` (`-Segments`)
 
@@ -354,14 +359,14 @@ jasna spec version: 0.9.1
 | Key | Target problem | What is presented | Quality loss |
 |---|---|---|---|
 | genpts | Missing/negative/duplicate PTS, backward DTS | Remux to mkv with `-fflags +genpts ... -c copy -avoid_negative_ts make_zero` | lossless |
-| remux | Container corruption, unsupported extension, missing metadata | Remux to mkv with `-c copy` (with an `-err_detect ignore_err` note) | lossless |
+| remux | Container corruption, extension outside the folder-scan set, missing metadata | Remux to mkv with `-c copy` (with an `-err_detect ignore_err` note) | lossless |
 | jasna_reencode | jasna-unsupported codec (0.7.2), codec unsupported by `--segments` | Re-encode with `hevc_nvenc`. Adds `-vf bwdif` automatically when interlacing is detected | re-encode |
-| jasna_reencode_speed | Codec outside the hardware-decode set of jasna 0.8.1 and later | Same as above, but notes that processing still works so the fix is **optional** | re-encode |
+| reencode_speed | Codec outside lada-ex's NVDEC set, or outside the hardware-decode set of jasna 0.8.1 and later | Same as above, but notes that processing still works so the fix is **optional** | re-encode |
 | even_dims | Odd width or height | Crop to even dimensions with `crop=trunc(iw/2)*2:trunc(ih/2)*2` and re-encode (padding alternative noted) | re-encode |
 | pixfmt_420 | Chroma other than 4:2:0, excess bit depth | Convert to 8-bit 4:2:0 with `-vf format=yuv420p` and re-encode | re-encode |
 | color_convert | HDR (PQ / HLG) sources | Convert to BT.709 with zscale + tonemap (with a lighter variant noted for SDR sources) | re-encode |
 | color_tag | Missing color space tag | For h264/hevc, lossless tag writing via the `*_metadata` bsf (BT.601 values also noted). For other codecs, no action if the guess is fine, re-encode only when needed | codec-dependent |
-| range_tag | Unknown color range | For h264/hevc, write `video_full_range_flag=0` via bsf. Otherwise a re-encode suggestion | codec-dependent |
+| range_tag | Unknown color range | For h264/hevc, write `video_full_range_flag=0` via bsf (with a note to use `=1` for `yuvj*`). Otherwise a re-encode suggestion | codec-dependent |
 | vfr | VFR / large PTS gap | A note that remux won't fix it, plus a `-fps_mode cfr` re-encode suggestion (with a note to try as-is first) | re-encode |
 | interlace | Interlaced | Deinterlace with `-vf bwdif` and re-encode | re-encode |
 | reencode_broken | Bitstream corruption | Skip broken parts with `-err_detect ignore_err` and re-encode (with a note recommending re-obtaining the source) | re-encode |
@@ -372,7 +377,7 @@ Even if there are multiple problems with the same fix key, the command is presen
 
 The repair command output (and the ffmpeg commands written by `-FixScript`) is always `.mkv` (Matroska) regardless of the input extension, because using the same extension as the input sometimes does not constitute a repair / fails.
 
-- **Unsupported extensions are themselves a repair target**: when the extension is outside lada-ex's support (e.g. `.flv`), emitting the same extension keeps it unsupported. `.mkv` is supported by both lada-ex / jasna.
+- **The extension itself is a repair target**: when the extension is not picked up by the folder scan (e.g. `.flv`), emitting the same extension keeps it outside the scan. `.mkv` is picked up by both the lada-ex and jasna folder scans.
 - **mkv is the most lenient**: putting a stream rebuilt with `+genpts` / `-avoid_negative_ts make_zero` (for negative PTS, missing PTS, unusual time_base, etc.) back into mp4 tends to hit constraints and recur/fail, whereas mkv stores it cleanly.
 - **Codec-agnostic**: even containers that cannot properly hold HEVC (`.avi` / `.wmv` / `.vob`, etc.) fit into mkv reliably.
 

@@ -28,9 +28,11 @@
 # 終了コード: 0=全て OK / 1=WARN あり / 2=FAIL あり
 #
 # 判定根拠 (各ツール main ブランチのソース調査による):
-#   lada-ex : lada/utils/video_utils.py — 拡張子ホワイトリスト、first_pts<0 や
-#             time_base=1/10000000 で TorchCodec→PyAV フォールバック (低速化)、
-#             first_pts<-1000 で QSV クラッシュ回避、VFR 大ギャップで AV 同期ずれ
+#   lada-ex : lada/utils/video_utils.py + lada/cli/utils.py (0.12.1-dev) — first_pts<0 や
+#             time_base=1/10000000 で TorchCodec→PyAV フォールバック (低速化)。PyAV リーダーは
+#             PTS<0 のフレームを捨てる。first_pts<-1000 で QSV クラッシュ回避。NVDEC 対象外の
+#             コーデックは CPU デコード。ヘッダ FPS と実測 FPS の不一致は実測値で上書き。
+#             フォルダ走査は mimetypes の video/* 判定 (単一ファイル指定は拡張子を見ない)
 #   jasna   : 0.8.1 でメディア層が python_vali/PyNvVideoCodec から PyAV に全面移行し、
 #             入力制約が大きく変わったため -JasnaVersion で判定基準を切り替える。
 #     0.7.2 : NVDEC 必須でフォールバックが無く、h264/hevc/vp9/av1 以外は処理不能。
@@ -85,7 +87,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ツールのバージョン。リリースごとに更新する (README.md / README.en.md のバージョン行も同時に更新すること)
-$ToolVersion = "1.3.0"
+$ToolVersion = "1.4.0"
 
 # -Version: ffprobe/ffmpeg の検出より前に処理する (ツール未導入でも表示できるように)
 if ($Version) {
@@ -113,18 +115,18 @@ $Strings = @{
     fps_unknown            = 'fps不明'
     meta_audio_label       = '音声'
     fps_fail               = 'フレームレートが取得できません (r_frame_rate={0})'
-    duration_fail          = 'duration が取得できません (コンテナのインデックス欠落の可能性)'
+    duration_fail          = 'duration が取得できません (コンテナのインデックス欠落の可能性)。lada-ex / jasna ともメタデータ読み取り時に KeyError で停止する'
     resolution_fail        = '解像度が取得できません'
     vfr_detect             = 'VFR (可変フレームレート) の可能性: r_frame_rate={0:0.###} と avg_frame_rate={1:0.###} が不一致'
     interlace_detect       = 'インターレース素材 (field_order={0})。検出/復元精度が落ちるためデインターレース推奨'
     colorspace_unset       = 'color_space 未設定。jasna は未設定タグを黙って BT.709 として扱うため、実際が BT.601/BT.2020 だと色がずれる'
     colorspace_unsupported = 'color_space={0} は jasna が認識しないタグ。黙って BT.709 に読み替えられるため、実際の色との差がそのまま出力に残る (認識されるのは {1})'
-    colorrange_unknown     = 'color_range 不明。lada-ex は推定不能時 TorchCodec→PyAV フォールバック (低速化)'
-    ext_unsupported        = '拡張子 {0} は lada-ex の対応リスト外'
+    colorrange_unknown     = 'color_range 不明で、pix_fmt={0} からは限定レンジ (tv) と推定できない。lada-ex は TorchCodec→PyAV フォールバック (低速化)'
+    lada_ext_folder        = '拡張子 {0} は lada-ex のフォルダ走査で無視される可能性がある (Python の mimetypes が video/* と判定する拡張子のみ対象で、結果は OS 依存)。ファイルを個別に指定すれば処理できる'
+    lada_codec_slow        = 'コーデック {0} は lada-ex の NVDEC 対象外 (対象は {1})。TorchCodec を使えず CPU デコードに落ちるため低速化する'
     codec_unsupported      = 'コーデック {0} は jasna (NVDEC) 非対応 — 対応は {1} のみ'
     codec_slow             = 'コーデック {0} は jasna のハードウェアデコード対象外 (対象は {1})。CPU デコードへ黙ってフォールバックするため大幅に低速化する'
     jasna_odd_dims         = '幅または高さが奇数 ({0}x{1})。jasna は NV12 変換で偶数の解像度を要求するため、エンコード開始後に ValueError で停止する'
-    jasna_duration_missing = 'duration がストリームにもコンテナにもありません。jasna はメタデータ読み取り時に KeyError で停止します'
     jasna_start_pts_missing = 'start_pts がありません。jasna の GUI プレビューが TypeError で停止します (CLI での実行は可能)'
     jasna_hdr              = 'HDR 素材 (color_trc={0})。jasna はトーンマップを一切行わず転送特性をそのまま通すため、白飛び/暗転した出力になります'
     jasna_interlace        = 'インターレース素材 (field_order={0})。jasna はデインターレースを行わないため、櫛状ノイズが出力に残り検出精度も落ちます'
@@ -145,11 +147,11 @@ $Strings = @{
     seg_h264_profile       = 'H.264 の profile {0} は --segments 非対応 — 対応は {1}'
     seg_vfr                = '--segments は CFR 必須。r_frame_rate と avg_frame_rate が {0:0.###}% ずれています (許容 0.1%)'
     seg_ext                = '--segments の出力コンテナは {0} のみ。入力の拡張子は {1} なので、出力の拡張子を明示的に指定してください'
-    timebase_incompatible  = 'time_base=1/10000000 は TorchCodec exact seek 非互換 → PyAV フォールバック (低速化)'
+    timebase_incompatible  = 'time_base=1/10000000 は TorchCodec exact seek 非互換 → PyAV フォールバック (低速化)。--torch-reader-mode lowlevel なら TorchCodec のまま処理される'
     first_pkt_no_pts       = '先頭パケットの PTS がありません (壊れた AVI などのパターン。フレームのタイムスタンプが信頼できない)'
     first_pkt_unreadable   = '先頭パケットを読み取れません (コンテナ破損の可能性)'
-    neg_pts_large          = '異常に大きい負の開始 PTS (first_pts={0}, {1})。Intel QSV ではドライバクラッシュ回避のため VAAPI に強制される'
-    neg_pts                = '負の開始 PTS (first_pts={0})。TorchCodec/NVDEC で同期破綻するため PyAV フォールバック (低速化)'
+    neg_pts_large          = '異常に大きい負の開始 PTS (first_pts={0}, {1})。PyAV フォールバックで PTS<0 のフレームが出力から欠けるうえ、Intel QSV ではドライバクラッシュ回避のため VAAPI に強制される'
+    neg_pts                = '負の開始 PTS (first_pts={0})。TorchCodec/NVDEC で同期破綻するため PyAV フォールバック (低速化)。さらに PyAV リーダーは PTS<0 のフレームを捨てるため、その区間は出力から欠ける (--torch-reader-mode lowlevel なら TorchCodec のまま処理)'
     neg_pts_jasna          = '負の PTS のフレームは jasna ではデコード時に黙って捨てられる (先頭欠け・AV ずれの原因)'
     neg_pts_jasna_kept     = 'jasna は負の PTS のフレームを破棄せず、先頭を 0 に平行移動する。ただし重複/非単調な PTS は +1 されるため微小な時刻ずれが残る'
     neg_start_time         = '負の start_time ({0:0.###}s)。TorchCodec→PyAV フォールバック (低速化)'
@@ -159,6 +161,8 @@ $Strings = @{
     pktscan_dup_pts        = 'PTS が重複するパケットが {0} 個 (同時刻フレームの混在 = mux 不良)。少数ならそのまま処理が通ることも多いが、多いと再生のカクつきや AV 同期ずれの原因になる'
     pktscan_dts_backward   = 'DTS が逆行する箇所が {0} 個 (デコード順の破綻。シーク/デコードが不安定になる)'
     pktscan_gap            = 'PTS に大きなギャップが {0} 箇所 (最大 {1:0.##}s)。lada-ex で AV 同期ずれの原因になるパターン'
+    pktscan_fps_mismatch   = 'ヘッダの avg_frame_rate={0:0.###} と実測 FPS (パケット数/duration)={1:0.###} が 0.05 以上ずれている。lada-ex はヘッダを信用せず実測 FPS に置き換えて処理する (出力の fps が変わりうる)'
+    pktscan_duration_corrupt = '実測 FPS (パケット {0} 個 / duration {1:0.##}s) が 120 を超えてヘッダ FPS {2:0.###} と矛盾する。lada-ex は duration を破損とみなし {3:0.##}s に補正して処理する'
     decode_error           = 'デコードエラー {0} 件 (ビットストリーム破損): {1}'
 
     # --- 修復コマンド ---
@@ -176,8 +180,8 @@ $Strings = @{
   ffmpeg -i "{0}" -map 0 -map -0:d{2} -c:v hevc_nvenc -preset p5 -cq 19 -c:a copy "{1}_hevc.mkv"
   ※ DVD ソース (mpeg2) でインターレースの場合は -vf bwdif を必ず付ける
 '@
-    fix_jasna_reencode_speed = @'
-[jasna のハードウェアデコード対象外] 処理自体は通るため対処は任意。速度を優先するなら HEVC (NVENC) に再エンコード:
+    fix_reencode_speed = @'
+[ハードウェアデコード対象外] 処理自体は通るため対処は任意。速度を優先するなら HEVC (NVENC) に再エンコード:
   ffmpeg -i "{0}" -map 0 -map -0:d{2} -c:v hevc_nvenc -preset p5 -cq 19 -c:a copy "{1}_hevc.mkv"
   ※ 再エンコードは画質劣化を伴う。1 回しか処理しないなら低速のまま通す方が有利なことも多い
 '@
@@ -200,6 +204,7 @@ $Strings = @{
     fix_range_tag_meta = @'
 [色レンジ不明] 通常の動画は limited (TV) レンジ。タグを付けて remux (無劣化):
   ffmpeg -i "{0}" -map 0 -map -0:d -c copy -bsf:v:0 {2}=video_full_range_flag=0 "{1}_range.mkv"
+  ※ pix_fmt が yuvj* (フルレンジ) なら video_full_range_flag=1 にする
 '@
     fix_range_tag_reencode = @'
 [色レンジ不明] {2} は無劣化でのレンジタグ書き込み不可。
@@ -282,18 +287,18 @@ $Strings = @{
     fps_unknown            = 'fps unknown'
     meta_audio_label       = 'audio'
     fps_fail               = 'Cannot determine frame rate (r_frame_rate={0})'
-    duration_fail          = 'Cannot determine duration (container index may be missing)'
+    duration_fail          = 'Cannot determine duration (container index may be missing). Both lada-ex and jasna abort with a KeyError while reading metadata'
     resolution_fail        = 'Cannot determine resolution'
     vfr_detect             = 'Possible VFR (variable frame rate): r_frame_rate={0:0.###} and avg_frame_rate={1:0.###} differ'
     interlace_detect       = 'Interlaced source (field_order={0}). Deinterlacing recommended; detection/restoration accuracy drops otherwise'
     colorspace_unset       = 'color_space not set. jasna silently treats unset tags as BT.709, so colors shift if the source is actually BT.601/BT.2020'
     colorspace_unsupported = 'color_space={0} is a tag jasna does not recognize. It is silently coerced to BT.709, so any mismatch with the real colors carries into the output (recognized: {1})'
-    colorrange_unknown     = 'color_range unknown. lada-ex falls back from TorchCodec to PyAV when it cannot infer (slower)'
-    ext_unsupported        = 'Extension {0} is not in lada-ex''s supported list'
+    colorrange_unknown     = 'color_range unknown, and pix_fmt={0} does not let lada-ex infer limited (tv) range. It falls back from TorchCodec to PyAV (slower)'
+    lada_ext_folder        = 'Extension {0} may be skipped by lada-ex''s folder scan (only extensions that Python''s mimetypes classifies as video/* are picked up, and the result is OS-dependent). Passing the file individually still works'
+    lada_codec_slow        = 'Codec {0} is outside lada-ex''s NVDEC set ({1}). TorchCodec cannot be used, so it falls back to CPU decoding, which is slower'
     codec_unsupported      = 'Codec {0} is not supported by jasna (NVDEC) — only {1} are supported'
     codec_slow             = 'Codec {0} is outside jasna''s hardware-decode set ({1}). It silently falls back to CPU decoding, which is much slower'
     jasna_odd_dims         = 'Odd width or height ({0}x{1}). jasna requires even dimensions for NV12 conversion and aborts with a ValueError after encoding has started'
-    jasna_duration_missing = 'duration is missing from both the stream and the container. jasna aborts with a KeyError while reading metadata'
     jasna_start_pts_missing = 'start_pts is missing. jasna''s GUI preview aborts with a TypeError (CLI runs still work)'
     jasna_hdr              = 'HDR source (color_trc={0}). jasna performs no tone mapping and passes the transfer characteristics through, so the output looks blown out or crushed'
     jasna_interlace        = 'Interlaced source (field_order={0}). jasna does not deinterlace, so combing remains in the output and detection accuracy drops'
@@ -314,11 +319,11 @@ $Strings = @{
     seg_h264_profile       = 'H.264 profile {0} is not supported by --segments — supported: {1}'
     seg_vfr                = '--segments requires CFR. r_frame_rate and avg_frame_rate differ by {0:0.###}% (tolerance 0.1%)'
     seg_ext                = '--segments only writes {0} containers. The input extension is {1}, so specify the output extension explicitly'
-    timebase_incompatible  = 'time_base=1/10000000 is incompatible with TorchCodec exact seek → PyAV fallback (slower)'
+    timebase_incompatible  = 'time_base=1/10000000 is incompatible with TorchCodec exact seek → PyAV fallback (slower). With --torch-reader-mode lowlevel it stays on TorchCodec'
     first_pkt_no_pts       = 'First packet has no PTS (a pattern seen in broken AVIs; frame timestamps cannot be trusted)'
     first_pkt_unreadable   = 'Cannot read the first packet (possible container corruption)'
-    neg_pts_large          = 'Abnormally large negative start PTS (first_pts={0}, {1}). On Intel QSV this forces VAAPI to avoid a driver crash'
-    neg_pts                = 'Negative start PTS (first_pts={0}). Sync breaks on TorchCodec/NVDEC, so it falls back to PyAV (slower)'
+    neg_pts_large          = 'Abnormally large negative start PTS (first_pts={0}, {1}). The PyAV fallback drops frames with PTS<0 from the output, and on Intel QSV this forces VAAPI to avoid a driver crash'
+    neg_pts                = 'Negative start PTS (first_pts={0}). Sync breaks on TorchCodec/NVDEC, so it falls back to PyAV (slower). The PyAV reader also drops frames with PTS<0, so that span is missing from the output (with --torch-reader-mode lowlevel it stays on TorchCodec)'
     neg_pts_jasna          = 'Frames with negative PTS are silently dropped by jasna during decoding (causes missing head / AV desync)'
     neg_pts_jasna_kept     = 'jasna does not drop negative-PTS frames; it shifts the origin to 0. Duplicate/non-monotonic PTS values are bumped by +1, leaving small timing shifts'
     neg_start_time         = 'Negative start_time ({0:0.###}s). TorchCodec→PyAV fallback (slower)'
@@ -328,6 +333,8 @@ $Strings = @{
     pktscan_dup_pts        = '{0} packets have duplicate PTS (same-time frames mixed in = bad mux). A few often pass fine, but many cause playback stutter and AV desync'
     pktscan_dts_backward   = '{0} places where DTS goes backward (broken decode order; seeking/decoding becomes unstable)'
     pktscan_gap            = '{0} large PTS gaps (max {1:0.##}s). A pattern that causes AV desync in lada-ex'
+    pktscan_fps_mismatch   = 'Header avg_frame_rate={0:0.###} and measured FPS (packets/duration)={1:0.###} differ by more than 0.05. lada-ex distrusts the header and processes with the measured FPS (the output fps may change)'
+    pktscan_duration_corrupt = 'Measured FPS ({0} packets / duration {1:0.##}s) exceeds 120 and contradicts the header FPS {2:0.###}. lada-ex treats the duration as corrupted and corrects it to {3:0.##}s'
     decode_error           = '{0} decode errors (bitstream corruption): {1}'
 
     # --- fix commands ---
@@ -345,8 +352,8 @@ $Strings = @{
   ffmpeg -i "{0}" -map 0 -map -0:d{2} -c:v hevc_nvenc -preset p5 -cq 19 -c:a copy "{1}_hevc.mkv"
   Note: for interlaced DVD sources (mpeg2), always add -vf bwdif
 '@
-    fix_jasna_reencode_speed = @'
-[Outside jasna's hardware-decode set] Processing still works, so this is optional. For speed, re-encode to HEVC (NVENC):
+    fix_reencode_speed = @'
+[Outside the hardware-decode set] Processing still works, so this is optional. For speed, re-encode to HEVC (NVENC):
   ffmpeg -i "{0}" -map 0 -map -0:d{2} -c:v hevc_nvenc -preset p5 -cq 19 -c:a copy "{1}_hevc.mkv"
   Note: re-encoding degrades quality. If you only process the file once, taking the slow path is often the better trade
 '@
@@ -369,6 +376,7 @@ $Strings = @{
     fix_range_tag_meta = @'
 [Unknown color range] Most videos use limited (TV) range. Add the tag and remux (lossless):
   ffmpeg -i "{0}" -map 0 -map -0:d -c copy -bsf:v:0 {2}=video_full_range_flag=0 "{1}_range.mkv"
+  Note: if pix_fmt is yuvj* (full range), use video_full_range_flag=1 instead
 '@
     fix_range_tag_reencode = @'
 [Unknown color range] {2} does not support lossless range-tag writing.
@@ -480,11 +488,18 @@ $FFprobe = Find-Tool "ffprobe" $FFprobePath
 $FFmpeg  = Find-Tool "ffmpeg"  $FFmpegPath
 
 # --- 仕様定数 ---
-# lada-ex の対応拡張子 (lada/utils/video_utils.py の VIDEO_EXTENSIONS)
-$LadaExtensions = @(".asf", ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg",
-                    ".mpg", ".ts", ".wmv", ".webm", ".rmvb", ".vob", ".3gp")
-# ディレクトリ走査時の対象 (lada 対応 + 一般的な動画拡張子)
-$ScanExtensions = $LadaExtensions + @(".flv", ".m2ts", ".mts")
+# lada-ex CLI のフォルダ走査 (lada/cli/utils.py の _filter_video_files) は拡張子リストではなく、
+# Python の mimetypes が video/* と判定するかで選別する。判定は OS 依存 (Windows はレジストリ併用、
+# Linux は /etc/mime.types 併用) のため、ここには主要環境で video/* になる拡張子を列挙する。
+# 単一ファイル指定は拡張子を見ずにそのまま処理される。
+# (video_utils.py の is_video_file のリストはデータセット作成スクリプト専用で CLI は参照しない)
+$LadaFolderExtensions = @(".asf", ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg",
+                          ".mpg", ".ts", ".m2ts", ".mts", ".wmv", ".webm", ".3gp")
+# ディレクトリ走査時の対象 (上記 + mimetypes が video/* にしない一般的な動画拡張子)
+$ScanExtensions = $LadaFolderExtensions + @(".flv", ".rmvb", ".vob")
+# lada-ex が TorchCodec/NVDEC の対象にするコーデック (video_utils.py の NVDEC_SUPPORTED_CODECS)。
+# これ以外は CPU デコードに落ちる (非対応コーデックで NVDEC を試みた際の segfault は 0.12.1-dev で回避済み)
+$LadaHwCodecs = @("h264", "hevc", "av1", "vp9", "vp8", "mpeg2video", "mpeg4", "mjpeg")
 # --- jasna の仕様 (バージョン別) ---
 # 0.8.1 でメディア層が python_vali/PyNvVideoCodec → PyAV に変わり制約が大きく緩んだ一方、
 # 奇数解像度という新しい致命傷が加わった。バージョン差は必ずこのテーブルに集約し、
@@ -512,7 +527,7 @@ $JasnaSpecs = @{
     CodecSeverity = "WARN"
     CodecKey      = "codec_slow"
     # 0.8.1 では処理自体は通るため、再エンコードは「必須の修復」ではなく「高速化の任意手段」
-    CodecFixKey   = "jasna_reencode_speed"
+    CodecFixKey   = "reencode_speed"
     # BT.2020 に対応 (pipeline.py:515-526)
     Colorspaces   = @("bt709", "smpte170m", "bt470bg", "bt601", "bt2020nc", "bt2020_ncl")
     MaxBitDepth   = 10
@@ -702,8 +717,9 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
   if (-not $fps -or $fps -le 0) {
     Add-Finding $r "FAIL" "common" ((T 'fps_fail') -f $vStream.r_frame_rate) "remux"
   }
+  # lada-ex / jasna とも json_video_format['duration'] を直接参照するため、欠落は KeyError で停止 = FAIL
   if ($duration -le 0) {
-    Add-Finding $r "WARN" "common" (T 'duration_fail') "remux"
+    Add-Finding $r "FAIL" "common" (T 'duration_fail') "remux"
   }
   if ($width -le 0 -or $height -le 0) {
     Add-Finding $r "FAIL" "common" (T 'resolution_fail')
@@ -723,13 +739,24 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
   }
 
   # --- lada-ex: 色レンジ ---
-  if (-not $colorRange -or $colorRange -eq "unknown") {
-    Add-Finding $r "WARN" "lada" (T 'colorrange_unknown') "range_tag"
+  # color_range 不明でも pix_fmt が yuv* なら lada-ex は限定レンジ (tv) と推定して TorchCodec で受理する
+  # (is_safe_for_torchcodec の guess=tv 救済)。PyAV に落ちるのは yuvj* (フルレンジ推定) と
+  # yuv でも yuvj でもない形式 (rgb/gray 等) のみ
+  if ((-not $colorRange -or $colorRange -eq "unknown") -and
+      ($pixFmt -match '^yuvj' -or $pixFmt -notmatch '^yuv')) {
+    Add-Finding $r "WARN" "lada" ((T 'colorrange_unknown') -f $pixFmt) "range_tag"
   }
 
-  # --- lada-ex: 拡張子 ---
-  if ($File.Extension.ToLower() -notin $LadaExtensions) {
-    Add-Finding $r "FAIL" "lada" ((T 'ext_unsupported') -f $File.Extension) "remux"
+  # --- lada-ex: 拡張子 (フォルダ指定時のみ) ---
+  # CLI は単一ファイル指定なら拡張子を見ない。フォルダ走査だけが mimetypes の video/* 判定で選別する
+  if ($script:IsFolderScan -and $File.Extension.ToLower() -notin $LadaFolderExtensions) {
+    Add-Finding $r "WARN" "lada" ((T 'lada_ext_folder') -f $File.Extension) "remux"
+  }
+
+  # --- lada-ex: コーデック ---
+  # NVDEC_SUPPORTED_CODECS 外は TorchCodec を使えず PyAV の CPU デコードに落ちる (処理自体は通る)
+  if ($codec -and $codec -notin $LadaHwCodecs) {
+    Add-Finding $r "WARN" "lada" ((T 'lada_codec_slow') -f $codec, ($LadaHwCodecs -join "/")) "reencode_speed"
   }
 
   # =====================================================================
@@ -757,10 +784,6 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
     Add-JasnaFinding $r "FAIL" ((T 'jasna_odd_dims') -f $width, $height) "even_dims"
   }
 
-  # duration 欠落 → メタデータ読み取りで KeyError (両バージョン共通)
-  if ($duration -le 0) {
-    Add-JasnaFinding $r "FAIL" (T 'jasna_duration_missing') "remux"
-  }
   # start_pts 欠落 → GUI プレビューが TypeError (CLI は動く)
   if ($null -eq $startPts -or "$startPts" -eq "N/A") {
     Add-JasnaFinding $r "WARN" (T 'jasna_start_pts_missing') "genpts"
@@ -845,7 +868,7 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
 
   # --- standard: 全パケット PTS/DTS スキャン ---
   if ($Level -in @("standard", "full") -and -not $r.Failed) {
-    Invoke-PacketScan $r $p $tbVal
+    Invoke-PacketScan $r $p $tbVal $duration $avgFps
   }
 
   # --- standard: 音声パケットのタイムスタンプ検査 (jasna 対象時のみ) ---
@@ -863,7 +886,7 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
 }
 
 # --- 全パケット PTS/DTS スキャン (standard / full) ---
-function Invoke-PacketScan($Result, [string]$FilePath, $TimeBaseValue) {
+function Invoke-PacketScan($Result, [string]$FilePath, $TimeBaseValue, [double]$Duration = 0, $AvgFps = $null) {
   $ErrorActionPreference = "Continue"  # PS5.1: stderr リダイレクトでの NativeCommandError 停止を防ぐ
   $lines = & $FFprobe -v error -select_streams v:0 -show_entries packet=pts,dts -of csv=p=0 $FilePath 2>$null
   if ($LASTEXITCODE -ne 0 -or -not $lines) {
@@ -933,6 +956,20 @@ function Invoke-PacketScan($Result, [string]$FilePath, $TimeBaseValue) {
       }
       if ($gapCount -gt 0) {
         Add-Finding $Result "WARN" "lada" ((T 'pktscan_gap') -f $gapCount, ($maxGap * $TimeBaseValue)) "vfr"
+      }
+    }
+  }
+
+  # lada-ex のヘッダ FPS 検証 (get_video_meta_data): パケット数 / duration を実測 FPS とし、avg_frame_rate と
+  # 0.05 以上ずれると実測値で上書きする。実測が 120fps 超かつヘッダが 120 以下なら duration 破損とみなし
+  # パケット数 / ヘッダ FPS で duration を再計算する (いずれも処理は止まらない = 情報的 WARN)
+  if ($Duration -gt 0 -and $AvgFps -and $AvgFps -gt 0 -and $total -gt 0) {
+    $realFps = $total / $Duration
+    if ([math]::Abs($realFps - $AvgFps) -gt 0.05) {
+      if ($realFps -gt 120 -and $AvgFps -le 120) {
+        Add-Finding $Result "WARN" "lada" ((T 'pktscan_duration_corrupt') -f $total, $Duration, $AvgFps, ($total / $AvgFps)) "remux"
+      } else {
+        Add-Finding $Result "WARN" "lada" ((T 'pktscan_fps_mismatch') -f $AvgFps, $realFps) "vfr"
       }
     }
   }
@@ -1028,9 +1065,9 @@ function Get-FixSuggestion([string]$FixKey, $Result) {
       $deint = if ($Result.Findings | Where-Object { $_.FixKey -eq "interlace" }) { ' -vf bwdif' } else { '' }
       (T 'fix_jasna_reencode') -f $p, $stem, $deint
     }
-    "jasna_reencode_speed" {
+    "reencode_speed" {
       $deint = if ($Result.Findings | Where-Object { $_.FixKey -eq "interlace" }) { ' -vf bwdif' } else { '' }
-      (T 'fix_jasna_reencode_speed') -f $p, $stem, $deint
+      (T 'fix_reencode_speed') -f $p, $stem, $deint
     }
     "color_convert" { (T 'fix_color_convert') -f $p, $stem }
     "color_tag" {

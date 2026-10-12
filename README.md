@@ -2,7 +2,7 @@
 
 **日本語** | [English](README.en.md)
 
-Version: 1.3.0
+Version: 1.4.0
 
 [lada-ex](https://codeberg.org/comman/lada-ex) / [jasna](https://github.com/Kruk2/jasna) に投入する動画を、処理を始める前に検査する PowerShell 製のツールです。
 
@@ -225,9 +225,9 @@ Check-VideoInput.bat D:\videos\sample.mp4 -Level full
 
 ### フォルダ走査の対象拡張子
 
-lada-ex の対応リストに、一般的な動画拡張子を加えたものです。
+lada-ex のフォルダ走査で拾われる拡張子（後述）に、一般的な動画拡張子を加えたものです。
 
-`.asf .avi .m4v .mkv .mov .mp4 .mpeg .mpg .ts .wmv .webm .rmvb .vob .3gp .flv .m2ts .mts`
+`.asf .avi .m4v .mkv .mov .mp4 .mpeg .mpg .ts .m2ts .mts .wmv .webm .3gp .flv .rmvb .vob`
 
 （ファイルを 1 つだけ指定した場合は、拡張子に関係なく検査します）
 
@@ -243,12 +243,14 @@ lada-ex の対応リストに、一般的な動画拡張子を加えたもので
 | 2 | ffprobe が解析に失敗（コンテナ破損） | FAIL | remux |
 | 3 | 映像ストリームが無い | FAIL | — |
 | 4 | フレームレートが取得できない（`r_frame_rate` の分母 0 など） | FAIL | remux |
-| 5 | duration が取得できない | WARN | remux |
+| 5 | duration が取得できない | FAIL | remux |
 | 6 | 解像度が取得できない | FAIL | — |
 | 7 | VFR の可能性（`r_frame_rate` と `avg_frame_rate` の差が 1% 超） | WARN | vfr |
 | 8 | インターレース（`field_order` が progressive/unknown 以外） | WARN | interlace |
 | 9 | 先頭パケットの PTS が N/A（壊れた AVI のパターン） | FAIL | genpts |
 | 10 | 先頭パケットが読み取れない | FAIL | remux |
+
+> duration の欠落は lada-ex / jasna のどちらもメタデータ読み取り時に `KeyError` で停止するため FAIL です（1.4.0 で lada-ex 側も FAIL に揃えました）。
 
 ### standard で追加（全パケットスキャン）
 
@@ -261,6 +263,8 @@ lada-ex の対応リストに、一般的な動画拡張子を加えたもので
 | PTS の重複 | FAIL | 同時刻フレームの混在＝ mux 不良です（少数ならそのまま通ることも多く、多いとカクつき・同期ずれの原因になります） |
 | DTS の逆行 | FAIL | デコード順が破綻し、シーク／デコードが不安定になります |
 | ソート後の PTS の大きなギャップ | WARN (lada) | lada-ex で AV 同期がずれる既知の原因です |
+| ヘッダ FPS と実測 FPS の不一致（`avg_frame_rate` と `パケット数 / duration` の差が 0.05 超） | WARN (lada) | lada-ex はヘッダを信用せず実測 FPS に置き換えて処理するため、出力の fps が変わりえます |
+| duration の破損（実測 FPS が 120 超なのにヘッダ FPS が 120 以下） | WARN (lada) | lada-ex は duration を破損とみなし `パケット数 / ヘッダ FPS` に補正して処理します |
 
 大きなギャップの閾値は `max(中央値フレーム間隔 × 4, 0.5 秒)` です。PTS は B フレームのために非単調になるのが正常なので、単調性は DTS で判定し、PTS はソート後のギャップで判定します。
 
@@ -270,14 +274,18 @@ lada-ex の対応リストに、一般的な動画拡張子を加えたもので
 
 ### lada-ex 固有の判定
 
+判定基準は lada-ex 0.12.1-dev（2026-10-12 時点の main）のソースに基づきます。
+
 | 項目 | 判定 | 根拠 |
 |---|---|---|
-| 拡張子がホワイトリスト外 | FAIL | lada-ex の対応拡張子リストに含まれません |
-| `first_pts < -1000` | WARN | Intel QSV のドライバクラッシュ回避のため VAAPI に強制されます |
-| `first_pts < 0` / `start_time < 0` | WARN | TorchCodec → PyAV フォールバック（低速化）が発生します |
-| `time_base == 1/10000000` | WARN | TorchCodec の exact seek と非互換のため PyAV にフォールバックします |
-| `color_range` が不明 | WARN | 推定できない場合 PyAV にフォールバックします |
+| フォルダ走査で拾われない拡張子 | WARN | lada-ex の CLI は拡張子リストを持たず、フォルダ指定時は Python の `mimetypes` が `video/*` と判定したファイルだけを処理します（結果は OS 依存。Windows では `.flv .rmvb .vob` が除外されます）。ファイルを個別に指定すれば拡張子に関係なく処理されるため、フォルダ指定時のみ検出します |
+| コーデックが NVDEC 対象外（h264 / hevc / av1 / vp9 / vp8 / mpeg2video / mpeg4 / mjpeg 以外） | WARN | TorchCodec を使えず PyAV の CPU デコードに落ちます。処理自体は通るため対処は任意です |
+| `first_pts < -1000` | WARN | PyAV フォールバックに加え、Intel QSV ではドライバクラッシュ回避のため VAAPI に強制されます |
+| `first_pts < 0` / `start_time < 0` | WARN | TorchCodec → PyAV フォールバック（低速化）が発生します。さらに PyAV リーダーは PTS が負のフレームを捨てるため、その区間は出力から欠けます（`--torch-reader-mode lowlevel` を使う場合は TorchCodec のまま処理されます） |
+| `time_base == 1/10000000` | WARN | TorchCodec の exact seek と非互換のため PyAV にフォールバックします（`--torch-reader-mode lowlevel` なら TorchCodec のまま） |
+| `color_range` が不明で、`pix_fmt` から限定レンジと推定できない | WARN | `pix_fmt` が `yuv*` なら lada-ex は限定レンジ（tv）と推定して TorchCodec で処理するため対象外です。`yuvj*`（フルレンジ推定）と yuv 系以外（rgb / gray など）は PyAV にフォールバックします |
 | VFR + PTS の大きなギャップ | WARN | AV 同期がずれる既知の原因です |
+| ヘッダ FPS と実測 FPS の不一致 / duration の破損 | WARN | `standard` 以上で検査します（前節を参照） |
 
 ### jasna 固有の判定
 
@@ -291,7 +299,6 @@ jasna 0.8.1 でメディア層が python_vali/PyNvVideoCodec から **PyAV に�
 | `color_space` が対応外 | WARN | WARN | 0.8.1 は BT.2020 に対応しました。**どちらのバージョンでも未知のタグは例外にならず黙って BT.709 に読み替えられる**ため、実害は停止ではなく色ずれです |
 | `color_space` が未設定 | WARN | WARN | 同上（黙って BT.709 として扱われます） |
 | 幅または高さが奇数 | — | **FAIL** | 0.8.1 以降は NV12 / P010 変換が偶数の解像度を要求し、**エンコード開始後に**停止します |
-| `duration` が取得できない | **FAIL** | **FAIL** | メタデータ読み取り時に `KeyError` で停止します |
 | `start_pts` が無い | WARN | WARN | GUI プレビューが `TypeError` で停止します（CLI での実行は可能です） |
 | HDR（PQ / HLG） | WARN | WARN | トーンマップが行われず転送特性がそのまま通るため、白飛び／暗転します |
 | インターレース | WARN | WARN | jasna 側でデインターレースされません |
@@ -303,7 +310,7 @@ jasna 0.8.1 でメディア層が python_vali/PyNvVideoCodec から **PyAV に�
 | 音声パケットに PTS/DTS が無い | WARN | WARN | 該当パケットは破棄されます（`standard` 以上で検査） |
 | フォルダ走査の対象外拡張子 | WARN | WARN | jasna のフォルダ走査は `.mp4 .mkv .avi .mov .wmv .flv .webm` のみが対象です。ファイルを個別に指定すれば処理できます（フォルダ指定時のみ検出） |
 
-> `duration` の欠落を FAIL としたため、以前のバージョンで終了コード 1 だったファイルが 2 になる場合があります。
+> `duration` の欠落は jasna 固有ではなく lada-ex でも `KeyError` で停止するため、1.4.0 から共通判定（FAIL）に移しました。
 
 ### `--segments` を使う場合の追加チェック（`-Segments`）
 
@@ -354,14 +361,14 @@ jasna 仕様バージョン: 0.9.1
 | キー | 対象の問題 | 提示する内容 | 劣化 |
 |---|---|---|---|
 | genpts | PTS の欠落／負値／重複、DTS の逆行 | `-fflags +genpts ... -c copy -avoid_negative_ts make_zero` で mkv に remux | 無劣化 |
-| remux | コンテナ破損・拡張子非対応・メタデータ欠落 | `-c copy` で mkv に remux（`-err_detect ignore_err` の注記付き） | 無劣化 |
+| remux | コンテナ破損・フォルダ走査対象外の拡張子・メタデータ欠落 | `-c copy` で mkv に remux（`-err_detect ignore_err` の注記付き） | 無劣化 |
 | jasna_reencode | jasna 非対応のコーデック（0.7.2）、`--segments` 非対応のコーデック | `hevc_nvenc` で再エンコード。インターレース検出時は `-vf bwdif` を自動付与 | 再エンコード |
-| jasna_reencode_speed | jasna 0.8.1 以降のハードウェアデコード対象外のコーデック | 同上。ただし処理自体は通るため**対処は任意**である旨を明記 | 再エンコード |
+| reencode_speed | lada-ex の NVDEC 対象外、または jasna 0.8.1 以降のハードウェアデコード対象外のコーデック | 同上。ただし処理自体は通るため**対処は任意**である旨を明記 | 再エンコード |
 | even_dims | 幅または高さが奇数 | `crop=trunc(iw/2)*2:trunc(ih/2)*2` で偶数化して再エンコード（`pad` での代替も注記） | 再エンコード |
 | pixfmt_420 | 4:2:0 以外のクロマ、ビット深度の超過 | `-vf format=yuv420p` で 8bit 4:2:0 に変換して再エンコード | 再エンコード |
 | color_convert | HDR（PQ / HLG）素材 | zscale + tonemap で BT.709 化（SDR 素材向けの軽量版も注記） | 再エンコード |
 | color_tag | 色空間タグの欠落 | h264/hevc は `*_metadata` bsf で無劣化のタグ書き込み（BT.601 用の値も注記）。他コーデックは、推定で問題なければ対処不要、必要時のみ再エンコード | コーデック依存 |
-| range_tag | 色レンジが不明 | h264/hevc は `video_full_range_flag=0` を bsf で書き込み。他は再エンコード案 | コーデック依存 |
+| range_tag | 色レンジが不明 | h264/hevc は `video_full_range_flag=0` を bsf で書き込み（`yuvj*` なら `=1` の注記付き）。他は再エンコード案 | コーデック依存 |
 | vfr | VFR / PTS の大きなギャップ | remux では直らない旨と、`-fps_mode cfr` での再エンコード案（まず無加工で試す推奨を明記） | 再エンコード |
 | interlace | インターレース | `-vf bwdif` でデインターレースして再エンコード | 再エンコード |
 | reencode_broken | ビットストリーム破損 | `-err_detect ignore_err` で読み飛ばして再エンコード（元データの再入手を推奨と明記） | 再エンコード |
@@ -372,7 +379,7 @@ jasna 仕様バージョン: 0.9.1
 
 修復コマンドの出力（および後述の `-FixScript` が書き出す ffmpeg コマンド）は、入力の拡張子にかかわらず常に `.mkv`（Matroska）にしています。入力と同じ拡張子では修復にならない／失敗するケースがあるためです。
 
-- **拡張子非対応そのものが修復対象**: 拡張子が lada-ex 対応外（例: `.flv`）のとき、同じ拡張子で出すと非対応のままになります。`.mkv` は lada-ex / jasna 両対応です。
+- **拡張子そのものが修復対象**: フォルダ走査で拾われない拡張子（例: `.flv`）のとき、同じ拡張子で出すと走査対象外のままになります。`.mkv` は lada-ex / jasna のどちらのフォルダ走査でも対象です。
 - **mkv が最も寛容**: 負 PTS・PTS 欠落・特殊な time_base などを `+genpts` / `-avoid_negative_ts make_zero` で作り直したストリームを mp4 に戻すと制約に引っかかり再発・失敗しやすい一方、mkv は素直に格納できます。
 - **コーデックを選ばない**: `.avi` / `.wmv` / `.vob` などへ HEVC を正規に格納できないコンテナでも、mkv なら確実に収まります。
 
