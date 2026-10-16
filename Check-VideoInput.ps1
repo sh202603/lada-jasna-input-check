@@ -41,7 +41,12 @@
 #             「低速化」。BT.2020 に対応。負 PTS は破棄せず原点を 0 に平行移動する。
 #             一方で奇数解像度 (rgb_to_nv12.py の ValueError) が新たな致命傷になった
 #     0.9.1 : 入力に関わる仕様は 0.8.1 と同一 (デコーダは VALI(NVDEC) 優先に戻ったが
-#             ソフトウェアフォールバックは維持)。既定の判定基準はこのバージョン
+#             ソフトウェアフォールバックは維持)
+#     0.10.0: 字幕・チャプター・添付・データ等を出力へコピーするようになった (コピー不能なものは
+#             警告のみでスキップ)。2 本目以降の映像は未処理のままコピーされる。PTS/DTS の無い音声
+#             パケットは破棄されずそのまま mux される
+#     0.11.1: start_pts 欠落を 0 として扱うようになり、GUI プレビューの TypeError が解消。
+#             既定の判定基準はこのバージョン
 #     共通    : 未知の color_space タグは黙って BT.709 に読み替えられる (例外にはならず色がずれる)。
 #             duration がストリームにもコンテナにも無いとメタデータ読み取りで KeyError
 
@@ -58,8 +63,8 @@ param(
 
   # 判定基準とする jasna のバージョン。0.8.1 でメディア層が PyAV に移行し制約が大きく変わった。
   # -Target が jasna / both のときのみ意味を持つ
-  [ValidateSet("0.7.2", "0.8.1", "0.9.1")]
-  [string]$JasnaVersion = "0.9.1",
+  [ValidateSet("0.7.2", "0.8.1", "0.9.1", "0.10.0", "0.11.1")]
+  [string]$JasnaVersion = "0.11.1",
 
   # jasna の --segments (スマートレンダリング) 使用を前提に厳格な追加チェックを行う (0.8.1 以降)
   [switch]$Segments,
@@ -87,7 +92,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ツールのバージョン。リリースごとに更新する (README.md / README.en.md のバージョン行も同時に更新すること)
-$ToolVersion = "1.4.0"
+$ToolVersion = "1.5.0"
 
 # -Version: ffprobe/ffmpeg の検出より前に処理する (ツール未導入でも表示できるように)
 if ($Version) {
@@ -138,8 +143,14 @@ $Strings = @{
     jasna_stream_attachment = '添付 {0} 本'
     jasna_stream_chapter   = 'チャプター {0} 個'
     jasna_multi_video      = '映像ストリームが {0} 本あります。jasna は先頭の 1 本のみを処理し、残りは出力に含まれません'
+    jasna_extra_streams_kept = '{0}は jasna の出力から失われる可能性があります (字幕・チャプター等は出力へコピーされますが、コピーできないストリームは警告ログのみでスキップされます)'
+    jasna_stream_data_kept = 'データ {0} 本 (コピー可能なコーデックを持たないものは常に除外)'
+    jasna_stream_attachment_kept = '添付 {0} 本 (出力が mkv 以外のとき)'
+    jasna_stream_bitmap_sub = 'ビットマップ字幕 {0} 本 (出力コンテナが非対応のとき。mkv なら保持)'
+    jasna_multi_video_copied = '映像ストリームが {0} 本あります。jasna は先頭の 1 本のみを処理し、残りは未処理のまま出力にコピーされます (モザイクの残った映像が出力に含まれます)'
     jasna_ext_folder       = '拡張子 {0} は jasna のフォルダ走査対象 ({1}) 外です。ファイルを個別に指定すれば処理できます'
     jasna_audio_no_ts      = 'PTS と DTS の両方が無い音声パケットが {0} 個。jasna はこれらを破棄するため音が欠けます'
+    jasna_audio_no_ts_muxed = 'PTS と DTS の両方が無い音声パケットが {0} 個。jasna はこれらをタイムスタンプ未設定のまま mux するため、muxer の推定値で配置され音ずれする恐れがあります'
     seg_codec              = '--segments (スマートレンダリング) はコーデック {0} に非対応 — 対応は {1}'
     seg_pixfmt             = '--segments は pix_fmt {0} に非対応 — 対応は {1}'
     seg_field_order        = '--segments はプログレッシブ素材のみ対応 (field_order={0})'
@@ -310,8 +321,14 @@ $Strings = @{
     jasna_stream_attachment = '{0} attachment stream(s)'
     jasna_stream_chapter   = '{0} chapter(s)'
     jasna_multi_video      = '{0} video streams found. jasna processes only the first one; the rest are absent from the output'
+    jasna_extra_streams_kept = '{0} may be lost from jasna''s output (subtitles, chapters, etc. are copied to the output, but streams that cannot be copied are skipped with only a log warning)'
+    jasna_stream_data_kept = '{0} data stream(s) (always dropped when they have no copyable codec)'
+    jasna_stream_attachment_kept = '{0} attachment stream(s) (when the output is not mkv)'
+    jasna_stream_bitmap_sub = '{0} bitmap subtitle stream(s) (when the output container does not support them; kept in mkv)'
+    jasna_multi_video_copied = '{0} video streams found. jasna processes only the first one; the rest are copied to the output unprocessed (the output will contain video with the mosaic still in place)'
     jasna_ext_folder       = 'Extension {0} is outside jasna''s folder-scan list ({1}). Passing the file individually still works'
     jasna_audio_no_ts      = '{0} audio packets have neither PTS nor DTS. jasna drops them, causing audio dropouts'
+    jasna_audio_no_ts_muxed = '{0} audio packets have neither PTS nor DTS. jasna muxes them with unset timestamps, so the muxer places them at guessed times and audio may drift out of sync'
     seg_codec              = '--segments (smart rendering) does not support codec {0} — supported: {1}'
     seg_pixfmt             = '--segments does not support pix_fmt {0} — supported: {1}'
     seg_field_order        = '--segments supports progressive sources only (field_order={0})'
@@ -520,6 +537,13 @@ $JasnaSpecs = @{
     NegPtsKey     = "neg_pts_jasna"
     # 0.7.2 には splice.py が無く --segments 自体が存在しない
     HasSegments   = $false
+    # start_pts 欠落時に metadata.start_pts が None のまま GUI プレビューで演算され TypeError になる
+    StartPtsTypeError = $true
+    # 出力へ muxing するのは映像 1 本 + 音声のみ (字幕・データ・添付・チャプター・他の映像は失われる)
+    KeepsExtraStreams = $false
+    MultiVideoKey = "jasna_multi_video"
+    # PTS/DTS の両方が無い音声パケットは破棄される
+    AudioNoTsKey  = "jasna_audio_no_ts"
   }
   "0.8.1" = @{
     HwCodecs      = @("h264", "hevc", "vp9", "av1")
@@ -535,6 +559,10 @@ $JasnaSpecs = @{
     CheckOddDims  = $true
     NegPtsKey     = "neg_pts_jasna_kept"
     HasSegments   = $true
+    StartPtsTypeError = $true
+    KeepsExtraStreams = $false
+    MultiVideoKey = "jasna_multi_video"
+    AudioNoTsKey  = "jasna_audio_no_ts"
   }
 }
 # 0.9.1: 入力に関わる仕様は 0.8.1 と同一のため同じテーブルを共有する (v0.8.1..v0.9.1 のソース比較による)。
@@ -544,7 +572,26 @@ $JasnaSpecs = @{
 #     start_pts 欠落の GUI TypeError、--segments のゲート (splice.py 無変更) はいずれも変わらず
 #   - 新規の入力制約は無し (追加されたのは LUT/シャープ/シーン検出/fmp4 など処理側のオプション)
 $JasnaSpecs["0.9.1"] = $JasnaSpecs["0.8.1"]
+# 0.10.0: 入力の可否 (コーデック・解像度・色空間・--segments のゲート) は 0.8.1 と同一。変わったのは
+# 出力のコンテナ構造の扱いのみ (1190cc8: video_encoder.py の _setup_source_streams)。
+#   - 映像 1 本以外の全ストリームを出力へコピーする。コピー不能なもの (コーデックを持たない data、
+#     mkv 以外への添付、出力コンテナ非対応の字幕) は警告ログのみでスキップ。チャプターも引き継ぐ
+#   - 2 本目以降の映像も add_stream_from_template で未処理のままコピーされる
+#   - 音声の「PTS/DTS 両方なしのパケットを破棄」が無くなり、そのまま mux される
+# 0.8.1 のテーブルを共有参照しているため、書き換える前に必ず Clone する (しないと 0.8.1/0.9.1 も変わる)
+$JasnaSpecs["0.10.0"] = $JasnaSpecs["0.8.1"].Clone()
+$JasnaSpecs["0.10.0"].KeepsExtraStreams = $true
+$JasnaSpecs["0.10.0"].MultiVideoKey = "jasna_multi_video_copied"
+$JasnaSpecs["0.10.0"].AudioNoTsKey  = "jasna_audio_no_ts_muxed"
+# 0.11.1: probe.py (旧 media/__init__.py) が start_pts = int(get('start_pts') or 0) になり、
+# 欠落しても常に int になるため GUI プレビューの TypeError は起きない (5dc8dc0)。それ以外は 0.10.0 と同一
+$JasnaSpecs["0.11.1"] = $JasnaSpecs["0.10.0"].Clone()
+$JasnaSpecs["0.11.1"].StartPtsTypeError = $false
 $JasnaSpec = $JasnaSpecs[$JasnaVersion]
+
+# jasna 0.10.0 以降で出力コンテナが対応しないとスキップされうるビットマップ字幕
+# (テキスト字幕は mov_text / webvtt / ass へ変換されるため保持される)
+$BitmapSubtitleCodecs = @("hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub")
 
 # jasna のフォルダ走査対象拡張子 (media_files.py:7-9)。単一ファイル指定時はこの検査を通らない
 $JasnaScanExtensions = @(".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm")
@@ -697,7 +744,7 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
   } elseif ($vStream.pix_fmt -and $vStream.pix_fmt -match '(\d+)(le|be)$') {
     $bitDepth = [int]$Matches[1]
   }
-  # ストリーム構成。jasna は映像 1 本 + 音声のみを muxing 対象にする
+  # ストリーム構成。jasna 0.9.1 以前は映像 1 本 + 音声のみを muxing 対象にする (0.10.0 以降は全ストリームのコピーを試みる)
   $vCount   = @($probe.Json.streams | Where-Object { $_.codec_type -eq "video" -and $_.disposition.attached_pic -ne 1 }).Count
   $subCount = @($probe.Json.streams | Where-Object { $_.codec_type -eq "subtitle" }).Count
   $datCount = @($probe.Json.streams | Where-Object { $_.codec_type -eq "data" }).Count
@@ -784,8 +831,8 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
     Add-JasnaFinding $r "FAIL" ((T 'jasna_odd_dims') -f $width, $height) "even_dims"
   }
 
-  # start_pts 欠落 → GUI プレビューが TypeError (CLI は動く)
-  if ($null -eq $startPts -or "$startPts" -eq "N/A") {
+  # start_pts 欠落 → GUI プレビューが TypeError (CLI は動く)。0.11.1 以降は 0 扱いで解消
+  if ($JasnaSpec.StartPtsTypeError -and ($null -eq $startPts -or "$startPts" -eq "N/A")) {
     Add-JasnaFinding $r "WARN" (T 'jasna_start_pts_missing') "genpts"
   }
 
@@ -812,15 +859,33 @@ function Test-VideoFile([System.IO.FileInfo]$File) {
 
   # 出力に引き継がれないストリーム
   $dropped = @()
-  if ($subCount -gt 0) { $dropped += ((T 'jasna_stream_subtitle')   -f $subCount) }
-  if ($datCount -gt 0) { $dropped += ((T 'jasna_stream_data')       -f $datCount) }
-  if ($attCount -gt 0) { $dropped += ((T 'jasna_stream_attachment') -f $attCount) }
-  if ($chpCount -gt 0) { $dropped += ((T 'jasna_stream_chapter')    -f $chpCount) }
+  if ($JasnaSpec.KeepsExtraStreams) {
+    # 0.10.0 以降: コピーを試み、できないものだけがスキップされる。mp4/mov のチャプター用テキスト
+    # トラック (bin_data) はチャプターとして別途引き継がれるため除外する (is_mov_chapter_stream と同条件)
+    $isMovSource = "$($fmt.format_name)" -match '(^|,)(mov|mp4|m4a|3gp|3g2|mj2)(,|$)'
+    $lostData = @($probe.Json.streams | Where-Object {
+      $_.codec_type -eq "data" -and -not (
+        $isMovSource -and $chpCount -gt 0 -and
+        "$($_.tags.handler_name)" -match '(?i)subtitle|chapter')
+    }).Count
+    $bitmapSubCount = @($probe.Json.streams | Where-Object {
+      $_.codec_type -eq "subtitle" -and $_.codec_name -in $BitmapSubtitleCodecs }).Count
+    if ($lostData -gt 0)       { $dropped += ((T 'jasna_stream_data_kept')       -f $lostData) }
+    if ($attCount -gt 0)       { $dropped += ((T 'jasna_stream_attachment_kept') -f $attCount) }
+    if ($bitmapSubCount -gt 0) { $dropped += ((T 'jasna_stream_bitmap_sub')      -f $bitmapSubCount) }
+    $extraKey = 'jasna_extra_streams_kept'
+  } else {
+    if ($subCount -gt 0) { $dropped += ((T 'jasna_stream_subtitle')   -f $subCount) }
+    if ($datCount -gt 0) { $dropped += ((T 'jasna_stream_data')       -f $datCount) }
+    if ($attCount -gt 0) { $dropped += ((T 'jasna_stream_attachment') -f $attCount) }
+    if ($chpCount -gt 0) { $dropped += ((T 'jasna_stream_chapter')    -f $chpCount) }
+    $extraKey = 'jasna_extra_streams'
+  }
   if ($dropped.Count -gt 0) {
-    Add-JasnaFinding $r "WARN" ((T 'jasna_extra_streams') -f ($dropped -join " / "))
+    Add-JasnaFinding $r "WARN" ((T $extraKey) -f ($dropped -join " / "))
   }
   if ($vCount -gt 1) {
-    Add-JasnaFinding $r "WARN" ((T 'jasna_multi_video') -f $vCount)
+    Add-JasnaFinding $r "WARN" ((T $JasnaSpec.MultiVideoKey) -f $vCount)
   }
 
   # フォルダ走査時のみ: jasna 側の拡張子フィルタ。単一ファイル指定はこの検査を通らない
@@ -997,7 +1062,8 @@ function Invoke-DecodeCheck($Result, [string]$FilePath) {
 }
 
 # --- 音声パケットのタイムスタンプ検査 (standard / full、jasna 対象時のみ) ---
-# jasna は pts/dts の双方が無い音声パケットを黙って破棄する (video_encoder.py:609-611)
+# jasna 0.9.1 以前は pts/dts の双方が無い音声パケットを黙って破棄する (video_encoder.py:609-611)。
+# 0.10.0 以降は破棄せずタイムスタンプ未設定のまま mux する (メッセージは $JasnaSpec.AudioNoTsKey で切り替え)
 function Invoke-AudioPacketScan($Result, [string]$FilePath) {
   $ErrorActionPreference = "Continue"  # PS5.1: stderr リダイレクトでの NativeCommandError 停止を防ぐ
   $lines = & $FFprobe -v error -select_streams a:0 -show_entries packet=pts,dts -of csv=p=0 $FilePath 2>$null
@@ -1013,7 +1079,7 @@ function Invoke-AudioPacketScan($Result, [string]$FilePath) {
     if (($ptsStr -eq "N/A" -or $ptsStr -eq "") -and ($dtsStr -eq "N/A" -or $dtsStr -eq "")) { $noTs++ }
   }
   if ($noTs -gt 0) {
-    Add-JasnaFinding $Result "WARN" ((T 'jasna_audio_no_ts') -f $noTs) "genpts"
+    Add-JasnaFinding $Result "WARN" ((T $JasnaSpec.AudioNoTsKey) -f $noTs) "genpts"
   }
 }
 

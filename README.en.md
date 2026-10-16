@@ -2,7 +2,7 @@
 
 [日本語](README.md) | **English**
 
-Version: 1.4.0
+Version: 1.5.0
 
 A PowerShell tool that inspects videos before you feed them to [lada-ex](https://codeberg.org/comman/lada-ex) / [jasna](https://github.com/Kruk2/jasna).
 
@@ -150,8 +150,8 @@ This wrapper works as follows.
 | `-Path` (position 0, required) | file or folder | — | Specifying a folder inspects all videos with target extensions at once |
 | `-Target` | `lada` / `jasna` / `both` | `both` | The tool to judge against. Affects the verdict line, fixes, and exit code |
 | `-Level` | `quick` / `standard` / `full` | `standard` | Inspection depth (see table below) |
-| `-JasnaVersion` | `0.7.2` / `0.8.1` / `0.9.1` | `0.9.1` | The jasna version to judge against. jasna 0.8.1 moved its media layer to PyAV, which changed the input constraints substantially (0.9.1 has the same input constraints as 0.8.1). Only meaningful when `-Target` is `jasna` or `both` |
-| `-Segments` | switch | off | Adds the stricter checks that apply when jasna's `--segments` (smart rendering) is used. Active on 0.8.1 / 0.9.1; a no-op on 0.7.2 |
+| `-JasnaVersion` | `0.7.2` / `0.8.1` / `0.9.1` / `0.10.0` / `0.11.1` | `0.11.1` | The jasna version to judge against. jasna 0.8.1 moved its media layer to PyAV, which changed the input constraints substantially (from 0.9.1 on, whether an input is accepted is the same as in 0.8.1; 0.10.0 / 0.11.1 changed only how extra streams and `start_pts` are handled). Only meaningful when `-Target` is `jasna` or `both` |
+| `-Segments` | switch | off | Adds the stricter checks that apply when jasna's `--segments` (smart rendering) is used. Active on 0.8.1 and later; a no-op on 0.7.2 |
 | `-Lang` | `ja` / `en` / `auto` | `auto` | Display language. `auto` shows Japanese if the OS culture is Japanese, otherwise English (the verdict and exit code are language-independent) |
 | `-Recurse` | switch | off | Also include subdirectories of the folder |
 | `-FixScript` | output file path | — | Writes the shown repair commands to a single file you can run later as a batch (see below) |
@@ -287,26 +287,31 @@ The criteria are based on the lada-ex 0.12.1-dev source (main as of 2026-10-12).
 
 ### jasna-specific judgments
 
-jasna 0.8.1 replaced its media layer wholesale (python_vali/PyNvVideoCodec → **PyAV**), which changed the input constraints substantially. `-JasnaVersion` selects which set of criteria to apply (default `0.9.1`).
+jasna 0.8.1 replaced its media layer wholesale (python_vali/PyNvVideoCodec → **PyAV**), which changed the input constraints substantially. `-JasnaVersion` selects which set of criteria to apply (default `0.11.1`).
 
 **0.9.1 has the same input constraints as 0.8.1** (established by comparing the v0.8.1 and v0.9.1 sources). 0.9.1 brought back VALI (NVDEC) as the primary decoder, but the `VALI → PyAV hardware decode → software decode` fallback chain is intact, so codec limitations still mean "slower", not "unsupported". The even-dimension requirement, the color-space coercion, the `duration` handling, and the `--segments` gates are unchanged. What 0.9.1 added (LUT, sharpening, scene detection, fMP4 output) is all on the processing side and does not affect whether an input is accepted.
 
-| Item | 0.7.2 | 0.8.1 / 0.9.1 | Rationale |
-|---|---|---|---|
-| Codec other than h264/hevc/vp9/av1 | **FAIL** | WARN | 0.7.2 requires NVDEC and cannot process it. 0.8.1 and later fall back to CPU decoding automatically, so the only cost is speed |
-| `color_space` not recognized | WARN | WARN | 0.8.1 added BT.2020 support. **In both versions an unknown tag is silently coerced to BT.709 rather than raising**, so the real cost is shifted colors, not a crash |
-| `color_space` not set | WARN | WARN | Same as above (silently treated as BT.709) |
-| Odd width or height | — | **FAIL** | The NV12 / P010 conversion in 0.8.1 and later requires even dimensions and aborts **after encoding has started** |
-| `start_pts` missing | WARN | WARN | The GUI preview aborts with a `TypeError` (CLI runs still work) |
-| HDR (PQ / HLG) | WARN | WARN | No tone mapping; the transfer characteristics pass straight through, so output is blown out or crushed |
-| Interlaced | WARN | WARN | jasna does not deinterlace |
-| Chroma other than 4:2:0 (4:2:2 / 4:4:4 / RGB) | WARN | WARN | Subsampled to 4:2:0, losing color resolution |
-| Bit depth above 10-bit | WARN | WARN | Reduced to 10-bit |
-| Negative-PTS packets | WARN | WARN | 0.7.2 drops them (missing head). 0.8.1 and later keep them and shift the origin to 0 |
-| Subtitle / data / attachment / chapter streams | WARN | WARN | Lost in the output (only the first video stream plus audio are muxed) |
-| Multiple video streams | WARN | WARN | Only the first one is processed |
-| Audio packets without PTS/DTS | WARN | WARN | Those packets are dropped (checked at `standard` and above) |
-| Extension outside the folder-scan list | WARN | WARN | jasna's folder scan only covers `.mp4 .mkv .avi .mov .wmv .flv .webm`. Passing the file individually still works (detected only for folder input) |
+**0.10.0 / 0.11.1 also accept the same inputs as 0.8.1** (codec, dimensions, color space, `duration`, and the `--segments` gates). Two things changed:
+
+- 0.10.0 preserves the source's container structure in the output. Every stream other than the processed video (subtitles, chapters, attachments, data, other video streams) is copied to the output; streams that cannot be copied are skipped with a log warning. Text subtitles are converted to `mov_text` / `webvtt` / `ass` to suit the output container. Audio packets with neither PTS nor DTS are no longer dropped.
+- 0.11.1 treats a missing `start_pts` as 0, so the GUI preview no longer aborts with a `TypeError`.
+
+| Item | 0.7.2 | 0.8.1 / 0.9.1 | 0.10.0 | 0.11.1 | Rationale |
+|---|---|---|---|---|---|
+| Codec other than h264/hevc/vp9/av1 | **FAIL** | WARN | WARN | WARN | 0.7.2 requires NVDEC and cannot process it. 0.8.1 and later fall back to CPU decoding automatically, so the only cost is speed |
+| `color_space` not recognized | WARN | WARN | WARN | WARN | 0.8.1 added BT.2020 support. **In every version an unknown tag is silently coerced to BT.709 rather than raising**, so the real cost is shifted colors, not a crash |
+| `color_space` not set | WARN | WARN | WARN | WARN | Same as above (silently treated as BT.709) |
+| Odd width or height | — | **FAIL** | **FAIL** | **FAIL** | The NV12 / P010 conversion in 0.8.1 and later requires even dimensions and aborts **after encoding has started** |
+| `start_pts` missing | WARN | WARN | WARN | — | The GUI preview aborts with a `TypeError` (CLI runs still work). 0.11.1 treats it as 0, so it is no longer a problem |
+| HDR (PQ / HLG) | WARN | WARN | WARN | WARN | No tone mapping; the transfer characteristics pass straight through, so output is blown out or crushed |
+| Interlaced | WARN | WARN | WARN | WARN | jasna does not deinterlace |
+| Chroma other than 4:2:0 (4:2:2 / 4:4:4 / RGB) | WARN | WARN | WARN | WARN | Subsampled to 4:2:0, losing color resolution |
+| Bit depth above 10-bit | WARN | WARN | WARN | WARN | Reduced to 10-bit |
+| Negative-PTS packets | WARN | WARN | WARN | WARN | 0.7.2 drops them (missing head). 0.8.1 and later keep them and shift the origin to 0 |
+| Subtitle / data / attachment / chapter streams | WARN | WARN | WARN for some | WARN for some | Up to 0.9.1 they are lost in the output (only the first video stream plus audio are muxed). From 0.10.0 they are copied to the output, so only what may still be lost gets a WARN: data streams without a codec, attachments when the output is not mkv, and bitmap subtitles the output container does not support. The chapter text track in mp4 / mov is excluded because it carries over as chapters |
+| Multiple video streams | WARN | WARN | WARN | WARN | Only the first one is processed. Up to 0.9.1 the rest are missing from the output; from 0.10.0 they are copied to the output **unprocessed** (so the output contains video with the mosaic still in place) |
+| Audio packets without PTS/DTS | WARN | WARN | WARN | WARN | Up to 0.9.1 those packets are dropped. From 0.10.0 they are muxed with unset timestamps and placed at times the muxer guesses, so audio may drift out of sync (checked at `standard` and above) |
+| Extension outside the folder-scan list | WARN | WARN | WARN | WARN | jasna's folder scan only covers `.mp4 .mkv .avi .mov .wmv .flv .webm`. Passing the file individually still works (detected only for folder input) |
 
 > A missing `duration` is not jasna-specific: lada-ex also aborts with a `KeyError`, so since 1.4.0 it is a common check (FAIL).
 
@@ -324,7 +329,7 @@ jasna's `--segments` (smart rendering) is far stricter than the normal path, and
 | Frame rate | CFR required (`r_frame_rate` and `avg_frame_rate` within 0.1% — stricter than the common VFR check) |
 | Input extension | Output containers are limited to `.mp4` / `.mov` / `.mkv`, so anything else requires specifying the output extension explicitly |
 
-0.7.2 has no `--segments` at all, so combining `-Segments` with `-JasnaVersion 0.7.2` adds nothing. The gates are identical between 0.8.1 and 0.9.1.
+0.7.2 has no `--segments` at all, so combining `-Segments` with `-JasnaVersion 0.7.2` adds nothing. The gates are identical from 0.8.1 through 0.11.1 (0.10.0 made `--segments` available on AMD GPUs (AMF), but the AMD-only constraint — H.264 with 4 or more consecutive B-frames is rejected — is not checked, because the tool cannot know the GPU vendor).
 
 ---
 
@@ -334,13 +339,13 @@ Each file is shown like this.
 
 ```
 Checking 1 file(s) / Target=both / Level=quick
-jasna spec version: 0.9.1
+jasna spec version: 0.11.1
 
 === sample.mp4 ===
   Metadata: mp4 / h264 / 1921x1080 / yuv420p / 29.97fps / 0:12:34 / audio: aac
   [WARN] (lada-ex) Negative start PTS (first_pts=-2002). ...
-  [FAIL] (jasna 0.9.1) Odd width or height (1921x1080). jasna requires even dimensions for NV12 conversion ...
-  Verdict: lada-ex → WARN / jasna 0.9.1 → NG
+  [FAIL] (jasna 0.11.1) Odd width or height (1921x1080). jasna requires even dimensions for NV12 conversion ...
+  Verdict: lada-ex → WARN / jasna 0.11.1 → NG
 
   --- Fixes ---
   [PTS problem] Regenerate PTS and remux to mkv (lossless, fast):
@@ -391,7 +396,7 @@ Note that repair commands that copy all streams with `-map 0` also use `-map -0:
 - It does not validate the resolution / aspect ratio of VR material (VR180/VR360/TAB) (lada-ex has no such validation logic either).
 - Beyond showing the codec name, audio is only checked at `standard` and above for packets that have neither PTS nor DTS (jasna drops those). Container-incompatible audio is re-encoded to AAC by jasna automatically, so no pre-check is needed.
 - The judgment criteria are based on lada-ex / jasna's requirements at the time of investigation. When the tools' specs change, the constants at the top of the script need review (for jasna, the version-keyed `$JasnaSpecs` table).
-- `-JasnaVersion` only offers the versions that have been investigated (0.7.2 / 0.8.1 / 0.9.1). For other versions, pick whichever behaves more closely (use 0.9.1 for any 0.9.x).
+- `-JasnaVersion` only offers the versions that have been investigated (0.7.2 / 0.8.1 / 0.9.1 / 0.10.0 / 0.11.1). For other versions, pick whichever behaves most closely (0.9.1 for any 0.9.x, 0.10.0 for 0.10.x, 0.11.1 for 0.11.x).
 
 ---
 
